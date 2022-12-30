@@ -18,12 +18,12 @@ type AssignTaskReply struct {
 	Status      int  // 0: map task; 1: reduce task; 2: finished
 	IsAvailable bool // true if there are available task in pool
 
-	MapFileName string // map input file name
-	MapTaskNum  int    // map task number
 	NMap        int
+	MapFileName string // map input file name
+	Mtn         int    // map task number
 
-	ReduceTaskNum int
-	NReduce       int
+	NReduce int
+	Rtn     int
 }
 
 type FinishTaskArgs struct {

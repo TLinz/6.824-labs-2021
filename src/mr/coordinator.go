@@ -90,11 +90,11 @@ func (c *Coordinator) AssignTask(args *ApplyTaskArgs, reply *AssignTaskReply) er
 	reply.NMap = len(c.mapTaskPool)
 	switch c.status {
 	case 0:
-		reply.MapFileName, reply.MapTaskNum = c.assignMapTask()
+		reply.MapFileName, reply.Mtn = c.assignMapTask()
 		reply.IsAvailable = (reply.MapFileName != "")
 	case 1:
-		reply.ReduceTaskNum = c.assignReduceTask()
-		reply.IsAvailable = (reply.ReduceTaskNum != -1)
+		reply.Rtn = c.assignReduceTask()
+		reply.IsAvailable = (reply.Rtn != -1)
 	case 2:
 	}
 	return nil

@@ -134,9 +134,9 @@ OUT:
 
 		switch reply.Status {
 		case 0:
-			handleMap(reply.MapFileName, reply.NReduce, reply.MapTaskNum)
+			handleMap(reply.MapFileName, reply.NReduce, reply.Mtn)
 		case 1:
-			handleReduce(reply.ReduceTaskNum, reply.NMap)
+			handleReduce(reply.Rtn, reply.NMap)
 		case 2:
 			break OUT
 		}
