@@ -173,6 +173,8 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 	c.slock.Lock()
 	defer c.slock.Unlock()
+
+	time.Sleep(200 * time.Millisecond)
 	return c.status == 2
 }
 
