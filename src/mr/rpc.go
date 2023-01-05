@@ -16,7 +16,7 @@ type ApplyTaskArgs struct {
 
 type AssignTaskReply struct {
 	Status      int  // 0: map task; 1: reduce task; 2: finished
-	IsAvailable bool // true if there are available task in pool
+	IsAvailable bool // true if there is available task in pool
 
 	NMap        int
 	MapFileName string // map input file name
