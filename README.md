@@ -1,5 +1,5 @@
 - [x]  Lab1:    MapReduce
-- [ ]  Lab2A: leader election
+- [x]  Lab2A: leader election
 - [ ]  Lab2B: log
 - [ ]  Lab2C: persistence
 - [ ]  Lab2D: log compaction
