@@ -90,6 +90,8 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
+	rtFlag bool
+
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
@@ -199,15 +201,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		if lastLogEntry.Term > args.LastLogTerm ||
 			(lastLogEntry.Term == args.LastLogTerm && len(rf.log)-1 > args.LastLogIndex) {
-			DPrintf("[N%d]'s logs are newer than [C%d]'s logs, refuse to vote.\n", rf.me, args.CandidateId)
+			DPrintf("NOMATCH:[N%d]'s logs are newer than [C%d]'s logs, refuse to vote.\n", rf.me, args.CandidateId)
 
 			if args.Term > rf.currentTerm {
 				rf.currentTerm = args.Term
 				prevState := rf.state
 				rf.state = Follower
 				if prevState == Leader || prevState == Candidate {
+					DPrintf("NOMATCH:[N%d] becomes follower because it receives [N%d]'s vote request which contains higher term.\n", rf.me, args.CandidateId)
 					// Must not hold the lock when sending data to rf.rtCh,
 					// otherwise it may cause the current RequestVote handler and ticker to get stuck.
+					rf.rtFlag = true
 					rf.mu.Unlock()
 					rf.rtCh <- 1
 					rf.mu.Lock()
@@ -229,7 +233,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
+			DPrintf("[N%d] votes for [C%d].\n", rf.me, args.CandidateId)
 
+			rf.rtFlag = true
 			rf.mu.Unlock()
 			rf.rtCh <- 1
 			return
@@ -237,18 +243,23 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+		DPrintf("[N%d] refuses to vote for [C%d].\n", rf.me, args.CandidateId)
 
 		rf.mu.Unlock()
 		return
 	}
-
+	if rf.state != Follower {
+		DPrintf("[N%d] becomes follower because it receives [N%d]'s vote request which contains higher term.\n", rf.me, args.CandidateId)
+	}
 	rf.currentTerm = args.Term
 	rf.votedFor = args.CandidateId
 	rf.state = Follower
 
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = true
+	DPrintf("[N%d] votes for [C%d].\n", rf.me, args.CandidateId)
 
+	rf.rtFlag = true
 	rf.mu.Unlock()
 	rf.rtCh <- 1
 }
@@ -329,6 +340,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// Must not hold the lock when sending data to rf.rtCh,
 	// otherwise it may cause the current AppendEntries handler and ticker to get stuck.
+	rf.rtFlag = true
 	rf.mu.Unlock()
 	rf.rtCh <- 1
 	rf.mu.Lock()
@@ -430,6 +442,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	log := logEntry{command, rf.currentTerm}
 	rf.log = append(rf.log, log)
+	DPrintf("[L%d] appends new log at %d.\n", rf.me, index-1)
 
 	rf.matchIndex[rf.me] = len(rf.log) - 1
 
@@ -542,20 +555,35 @@ func (rf *Raft) ticker() {
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 
-		interval := 200 + rand.Intn(150)
+		interval := 350 + rand.Intn(250)
 
 		rf.mu.Lock() // May stuck here if send data to rf.rtCh or ch(election) while holding the lock.
+		DPrintf("[N%d] reset timer with interval %dms.\n", rf.me, interval)
+
+		if rf.rtFlag {
+			DPrintf("[N%d] Warning: atomic0!\n", rf.me)
+			<-rf.rtCh
+			rf.rtFlag = false
+		}
 
 		if rf.state == Follower {
 			rf.mu.Unlock()
 			select {
 			case <-rf.rtCh:
+				rf.mu.Lock()
+				rf.rtFlag = false
+				rf.mu.Unlock()
 			case <-time.After(time.Duration(interval) * time.Millisecond):
 				// Timeout, start election...
 				rf.mu.Lock()
 				rf.currentTerm++
 				rf.state = Candidate
 				rf.votedFor = rf.me
+				if rf.rtFlag {
+					DPrintf("[N%d] Warning: atomic1!\n", rf.me)
+					<-rf.rtCh
+					rf.rtFlag = false
+				}
 				rf.mu.Unlock()
 			}
 		} else if rf.state == Candidate {
@@ -570,9 +598,17 @@ func (rf *Raft) ticker() {
 				if rf.state == Candidate {
 					rf.currentTerm++
 				}
+				if rf.rtFlag {
+					DPrintf("[N%d] Warning: atomic2!\n", rf.me)
+					<-rf.rtCh
+					rf.rtFlag = false
+				}
 				rf.mu.Unlock()
 			case <-finishCh:
 			case <-rf.rtCh:
+				rf.mu.Lock()
+				rf.rtFlag = false
+				rf.mu.Unlock()
 			}
 		} else {
 			rf.mu.Unlock()
@@ -591,6 +627,7 @@ func (rf *Raft) ticker() {
 						if rf.killed() {
 							if rf.state == Leader {
 								rf.state = Follower // TOFIX: should not become follower when being killed...
+								rf.rtFlag = true
 								rf.mu.Unlock()
 								rf.rtCh <- 1
 							} else {
@@ -634,6 +671,7 @@ func (rf *Raft) ticker() {
 									DPrintf("[L%d] steps aside because it receives [N%d]'s reply which contains higher term.\n", rf.me, idx)
 									rf.currentTerm = reply.Term
 									rf.state = Follower
+									rf.rtFlag = true
 									rf.mu.Unlock()
 									rf.rtCh <- 1
 									break
@@ -715,6 +753,7 @@ func (rf *Raft) ticker() {
 										DPrintf("[L%d] steps aside because it receives [N%d]'s reply which contains higher term.\n", rf.me, idx)
 										rf.currentTerm = reply.Term
 										rf.state = Follower
+										rf.rtFlag = true
 										rf.rtCh <- 1
 										rf.mu.Unlock()
 										return
@@ -768,6 +807,9 @@ func (rf *Raft) ticker() {
 			}
 
 			<-rf.rtCh
+			rf.mu.Lock()
+			rf.rtFlag = false
+			rf.mu.Unlock()
 
 		}
 	}
