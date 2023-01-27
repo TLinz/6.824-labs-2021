@@ -184,10 +184,11 @@ type RequestVoteReply struct {
 }
 
 // example RequestVote RPC handler.
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { // TODO🔧: refactor the code...
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 
+	// 1. Reply false if term < currentTerm (§5.1)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -196,72 +197,46 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	if len(rf.log) != 0 {
-		lastLogEntry := rf.log[len(rf.log)-1]
-
-		if lastLogEntry.Term > args.LastLogTerm ||
-			(lastLogEntry.Term == args.LastLogTerm && len(rf.log)-1 > args.LastLogIndex) {
-			DPrintf("NOMATCH:[N%d]'s logs are newer than [C%d]'s logs, refuse to vote.\n", rf.me, args.CandidateId)
-
-			if args.Term > rf.currentTerm {
-				rf.currentTerm = args.Term
-				prevState := rf.state
-				rf.state = Follower
-				if prevState == Leader || prevState == Candidate {
-					DPrintf("NOMATCH:[N%d] becomes follower because it receives [N%d]'s vote request which contains higher term.\n", rf.me, args.CandidateId)
-					// Must not hold the lock when sending data to rf.rtCh,
-					// otherwise it may cause the current RequestVote handler and ticker to get stuck.
-					rf.rtFlag = true
-					rf.mu.Unlock()
-					rf.rtCh <- 1
-					rf.mu.Lock()
-				}
-				rf.votedFor = -1
-			}
-
-			reply.Term = rf.currentTerm
-			reply.VoteGranted = false
-
-			rf.mu.Unlock()
-			return
+	stepAside := false
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		if rf.state == Leader || rf.state == Candidate {
+			stepAside = true
 		}
+		rf.state = Follower
 	}
-
-	if args.Term == rf.currentTerm {
-		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-			rf.votedFor = args.CandidateId
-
-			reply.Term = rf.currentTerm
-			reply.VoteGranted = true
-			DPrintf("[N%d] votes for [C%d].\n", rf.me, args.CandidateId)
-
-			rf.rtFlag = true
-			rf.mu.Unlock()
-			rf.rtCh <- 1
-			return
-		}
-
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
-		DPrintf("[N%d] refuses to vote for [C%d].\n", rf.me, args.CandidateId)
-
-		rf.mu.Unlock()
-		return
-	}
-	if rf.state != Follower {
-		DPrintf("[N%d] becomes follower because it receives [N%d]'s vote request which contains higher term.\n", rf.me, args.CandidateId)
-	}
-	rf.currentTerm = args.Term
-	rf.votedFor = args.CandidateId
-	rf.state = Follower
-
 	reply.Term = rf.currentTerm
-	reply.VoteGranted = true
-	DPrintf("[N%d] votes for [C%d].\n", rf.me, args.CandidateId)
 
-	rf.rtFlag = true
-	rf.mu.Unlock()
-	rf.rtCh <- 1
+	isUpToDate := true
+	if len(rf.log) != 0 {
+		lastLog := rf.log[len(rf.log)-1]
+		isUpToDate = args.LastLogTerm > lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex >= len(rf.log)-1)
+	}
+
+	// 2. If votedFor is null or candidateId, and candidate’s log is at
+	// least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && isUpToDate {
+		reply.VoteGranted = true
+		rf.votedFor = args.CandidateId
+
+		rf.rtFlag = true
+		rf.mu.Unlock()
+		if len(rf.rtCh) == 0 {
+			rf.rtCh <- 1
+		}
+	} else {
+		reply.VoteGranted = false
+		if stepAside {
+			rf.rtFlag = true
+			rf.mu.Unlock() // Must unlock after assigning true to rf.rtFlag!
+			if len(rf.rtCh) == 0 {
+				rf.rtCh <- 1
+			}
+		} else {
+			rf.mu.Unlock()
+		}
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -337,21 +312,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.votedFor = -1
 	}
 	rf.state = Follower
-
-	// Must not hold the lock when sending data to rf.rtCh,
-	// otherwise it may cause the current AppendEntries handler and ticker to get stuck.
-	rf.rtFlag = true
-	rf.mu.Unlock()
-	rf.rtCh <- 1
-	rf.mu.Lock()
-
 	reply.Term = rf.currentTerm
 
 	// Reply false if log doesn’t contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (§5.3)
 	if args.PrevLogIndex != -1 && (args.PrevLogIndex >= len(rf.log) || (rf.log[args.PrevLogIndex]).Term != args.PrevLogTerm) {
 		reply.Success = false
-		rf.mu.Unlock()
 	} else {
 		reply.Success = true
 
@@ -391,26 +357,37 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// If leaderCommit > commitIndex, set commitIndex =
 		// min(leaderCommit, index of last new entry)
 		if args.LeaderCommit > rf.commitIndex {
-			idx := rf.commitIndex + 1
+			// idx := rf.commitIndex + 1
 
 			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
 
-			for i := idx; i <= rf.commitIndex; i++ {
-				logCommited := rf.log[i]
-				command := logCommited.Command
-				index := i
-				rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: index + 1}
-				DPrintf("[N%d]: commit log[%d]\n", rf.me, i)
-			}
-			rf.mu.Unlock()
-		} else {
-			rf.mu.Unlock()
+			// for i := idx; i <= rf.commitIndex; i++ { // TODO🔧: wrap it as a function!
+			// 	logCommited := rf.log[i]
+			// 	command := logCommited.Command
+			// 	index := i
+			// 	rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: index + 1}
+			// 	DPrintf("[N%d]: commit log[%d]\n", rf.me, i)
+			// }
 		}
+	}
+
+	// Must not hold the lock when sending data to rf.rtCh,
+	// otherwise it may cause the current AppendEntries handler and ticker to get stuck.
+	rf.rtFlag = true
+	rf.mu.Unlock()
+	if len(rf.rtCh) == 0 {
+		rf.rtCh <- 1
 	}
 }
 
 // ⚠️ When calling sendAppendEntries, MUST NOT hold the lock.
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	rf.mu.Lock()
+	if rf.state != Leader || rf.currentTerm != args.Term {
+		rf.mu.Unlock()
+		return false
+	}
+	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
@@ -469,39 +446,29 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) election(ch chan int) {
+func (rf *Raft) election(args *RequestVoteArgs) {
 	// Send RequestVote RPCs to all other servers.
+	// When election() being called, lock is being held.
+	rf.mu.Lock()
 	voteSum := 0
 	isFinished := false
 	DPrintf("[N%d] starts election...\n", rf.me)
+	rf.mu.Unlock()
 
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
 
-		args := &RequestVoteArgs{}
-		rf.mu.Lock()
-		args.Term = rf.currentTerm
-		args.CandidateId = rf.me
-		args.LastLogIndex = len(rf.log) - 1
-		if args.LastLogIndex == -1 {
-			args.LastLogTerm = -1
-		} else {
-			args.LastLogTerm = rf.log[args.LastLogIndex].Term
-		}
-		rf.mu.Unlock()
-
 		reply := &RequestVoteReply{}
 
 		idx := i
-
 		// Send RequestVote RPCs concurrently.
 		go func(int) {
 			ok := rf.sendRequestVote(idx, args, reply)
-			if ok {
-				rf.mu.Lock()
-
+			rf.mu.Lock()
+			// if ok && rf.state == Candidate && rf.currentTerm == args.Term && reply.Term == rf.currentTerm {
+			if ok && rf.state == Candidate && rf.currentTerm == args.Term {
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
 					rf.state = Follower
@@ -509,12 +476,14 @@ func (rf *Raft) election(ch chan int) {
 					if !isFinished {
 						isFinished = true
 						rf.mu.Unlock()
-						ch <- 1
+						if len(rf.rtCh) == 0 {
+							rf.rtCh <- 1
+						}
 						rf.mu.Lock()
 					}
 				}
 
-				if rf.state == Candidate && reply.VoteGranted && reply.Term == rf.currentTerm { // When receiving outdated reply, ignore it.
+				if reply.VoteGranted {
 					voteSum++
 					if (voteSum+1)*2 > len(rf.peers) {
 						rf.state = Leader
@@ -531,14 +500,15 @@ func (rf *Raft) election(ch chan int) {
 						if !isFinished {
 							isFinished = true
 							rf.mu.Unlock()
-							ch <- 1
+							if len(rf.rtCh) == 0 {
+								rf.rtCh <- 1
+							}
 							rf.mu.Lock()
 						}
 					}
 				}
 				rf.mu.Unlock()
 			} else {
-				rf.mu.Lock()
 				DPrintf("[C%d] does not receive [N%d]'s vote reply...\n", rf.me, idx)
 				rf.mu.Unlock()
 			}
@@ -556,9 +526,9 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 
 		interval := 350 + rand.Intn(250)
+		DPrintf("[N%d] reset timer with interval %dms.\n", rf.me, interval)
 
 		rf.mu.Lock() // May stuck here if send data to rf.rtCh or ch(election) while holding the lock.
-		DPrintf("[N%d] reset timer with interval %dms.\n", rf.me, interval)
 
 		if rf.rtFlag {
 			DPrintf("[N%d] Warning: atomic0!\n", rf.me)
@@ -576,40 +546,49 @@ func (rf *Raft) ticker() {
 			case <-time.After(time.Duration(interval) * time.Millisecond):
 				// Timeout, start election...
 				rf.mu.Lock()
-				rf.currentTerm++
-				rf.state = Candidate
-				rf.votedFor = rf.me
 				if rf.rtFlag {
 					DPrintf("[N%d] Warning: atomic1!\n", rf.me)
 					<-rf.rtCh
 					rf.rtFlag = false
+				} else {
+					rf.currentTerm++
+					rf.state = Candidate
+					rf.votedFor = rf.me
 				}
 				rf.mu.Unlock()
 			}
-		} else if rf.state == Candidate {
-			rf.mu.Unlock()
-			finishCh := make(chan int)
 
-			go rf.election(finishCh)
+		} else if rf.state == Candidate {
+			args := &RequestVoteArgs{}
+			args.Term = rf.currentTerm
+			args.CandidateId = rf.me
+			args.LastLogIndex = len(rf.log) - 1
+			if args.LastLogIndex == -1 {
+				args.LastLogTerm = -1
+			} else {
+				args.LastLogTerm = rf.log[args.LastLogIndex].Term
+			}
+			rf.mu.Unlock()
+
+			go rf.election(args)
 
 			select {
 			case <-time.After(time.Duration(interval) * time.Millisecond):
 				rf.mu.Lock()
-				if rf.state == Candidate {
-					rf.currentTerm++
-				}
 				if rf.rtFlag {
 					DPrintf("[N%d] Warning: atomic2!\n", rf.me)
 					<-rf.rtCh
 					rf.rtFlag = false
+				} else if rf.state == Candidate {
+					rf.currentTerm++
 				}
 				rf.mu.Unlock()
-			case <-finishCh:
 			case <-rf.rtCh:
 				rf.mu.Lock()
 				rf.rtFlag = false
 				rf.mu.Unlock()
 			}
+
 		} else {
 			rf.mu.Unlock()
 
@@ -629,7 +608,9 @@ func (rf *Raft) ticker() {
 								rf.state = Follower // TOFIX: should not become follower when being killed...
 								rf.rtFlag = true
 								rf.mu.Unlock()
-								rf.rtCh <- 1
+								if len(rf.rtCh) == 0 {
+									rf.rtCh <- 1
+								}
 							} else {
 								rf.mu.Unlock()
 							}
@@ -637,10 +618,6 @@ func (rf *Raft) ticker() {
 						}
 
 						if rf.nextIndex[idx] != len(rf.log) {
-							if rf.state != Leader {
-								rf.mu.Unlock()
-								break
-							}
 
 							args := &AppendEntriesArgs{}
 							reply := &AppendEntriesReply{}
@@ -659,21 +636,17 @@ func (rf *Raft) ticker() {
 
 							DPrintf("[L%d] is sending log entries to [N%d]...\n", rf.me, idx)
 							ok := rf.sendAppendEntries(idx, args, reply)
-							if ok {
-								rf.mu.Lock()
-
-								if rf.state != Leader {
-									rf.mu.Unlock()
-									break
-								}
-
-								if reply.Term > rf.currentTerm && rf.state == Leader {
+							rf.mu.Lock()
+							if ok && rf.state == Leader && rf.currentTerm == args.Term {
+								if reply.Term > rf.currentTerm {
 									DPrintf("[L%d] steps aside because it receives [N%d]'s reply which contains higher term.\n", rf.me, idx)
 									rf.currentTerm = reply.Term
 									rf.state = Follower
 									rf.rtFlag = true
 									rf.mu.Unlock()
-									rf.rtCh <- 1
+									if len(rf.rtCh) == 0 {
+										rf.rtCh <- 1
+									}
 									break
 								}
 
@@ -691,17 +664,17 @@ func (rf *Raft) ticker() {
 									N := cp[(len(cp)-1)/2]
 
 									if N > rf.commitIndex && (rf.log[N]).Term == rf.currentTerm {
-										idx := rf.commitIndex + 1
+										// idx := rf.commitIndex + 1
 
 										rf.commitIndex = N
 
-										for i := idx; i <= rf.commitIndex; i++ {
-											logCommited := rf.log[i]
-											command := logCommited.Command
-											index := i
-											rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: index + 1}
-											DPrintf("[L%d] commits log[%d]\n", rf.me, i)
-										}
+										// for i := idx; i <= rf.commitIndex; i++ {
+										// 	logCommited := rf.log[i]
+										// 	command := logCommited.Command
+										// 	index := i
+										// 	rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: index + 1}
+										// 	DPrintf("[L%d] commits log[%d]\n", rf.me, i)
+										// }
 										rf.mu.Unlock()
 									} else {
 										rf.mu.Unlock()
@@ -712,13 +685,15 @@ func (rf *Raft) ticker() {
 									rf.mu.Unlock()
 								}
 							} else {
-								rf.mu.Lock()
+								if rf.state != Leader {
+									rf.mu.Unlock()
+									break
+								}
 								DPrintf("[L%d] does not receive [N%d]'s AppendEntries reply...\n", rf.me, idx)
 								rf.mu.Unlock()
 							}
 						} else {
 							// Sending heartbeat periodically.
-
 							if rf.state != Leader {
 								rf.mu.Unlock()
 								break
@@ -742,20 +717,18 @@ func (rf *Raft) ticker() {
 
 							go func(int) {
 								ok := rf.sendAppendEntries(idx, args, reply)
-								if ok {
-									rf.mu.Lock()
-									if rf.state != Leader {
-										rf.mu.Unlock()
-										return
-									}
+								rf.mu.Lock()
+								if ok && rf.state == Leader && rf.currentTerm == args.Term {
 
 									if reply.Term > rf.currentTerm {
 										DPrintf("[L%d] steps aside because it receives [N%d]'s reply which contains higher term.\n", rf.me, idx)
 										rf.currentTerm = reply.Term
 										rf.state = Follower
 										rf.rtFlag = true
-										rf.rtCh <- 1
 										rf.mu.Unlock()
+										if len(rf.rtCh) == 0 {
+											rf.rtCh <- 1
+										}
 										return
 									}
 
@@ -773,17 +746,17 @@ func (rf *Raft) ticker() {
 										N := cp[(len(cp)-1)/2]
 
 										if N > rf.commitIndex && (rf.log[N]).Term == rf.currentTerm {
-											idx := rf.commitIndex + 1
+											// idx := rf.commitIndex + 1
 
 											rf.commitIndex = N
 
-											for i := idx; i <= rf.commitIndex; i++ {
-												logCommited := rf.log[i]
-												command := logCommited.Command
-												index := i
-												rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: index + 1}
-												DPrintf("[L%d]: commit log[%d]\n", rf.me, i)
-											}
+											// for i := idx; i <= rf.commitIndex; i++ {
+											// 	logCommited := rf.log[i]
+											// 	command := logCommited.Command
+											// 	index := i
+											// 	rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: index + 1}
+											// 	DPrintf("[L%d]: commit log[%d]\n", rf.me, i)
+											// }
 											rf.mu.Unlock()
 										} else {
 											rf.mu.Unlock()
@@ -794,7 +767,6 @@ func (rf *Raft) ticker() {
 										rf.mu.Unlock()
 									}
 								} else {
-									rf.mu.Lock()
 									DPrintf("[L%d] does not receive [N%d]'s heartbeat reply...\n", rf.me, idx)
 									rf.mu.Unlock()
 								}
@@ -812,6 +784,29 @@ func (rf *Raft) ticker() {
 			rf.mu.Unlock()
 
 		}
+	}
+}
+
+func (rf *Raft) applyer() {
+	prevCommitIdx := -1
+	for !rf.killed() {
+		rf.mu.Lock()
+		cIdx := rf.commitIndex
+		rf.mu.Unlock()
+		if prevCommitIdx != cIdx {
+			for i := prevCommitIdx + 1; i <= cIdx; i++ {
+				rf.mu.Lock()
+				logCommited := rf.log[i]
+				rf.mu.Unlock()
+				command := logCommited.Command
+				index := i
+				rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: index + 1}
+				DPrintf("[L%d]: commit log[%d]\n", rf.me, i)
+			}
+			prevCommitIdx = cIdx
+		}
+
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -853,6 +848,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.applyer()
 
 	return rf
 }
@@ -866,3 +862,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 // I didn't consider the word "current"...
 
 // 3. Leader should not change its state to follower after being killed
+
+// 4. You'll want to have a separate long-running goroutine that sends
+// committed log entries in order on the applyCh. It must be separate,
+// since sending on the applyCh can block.
