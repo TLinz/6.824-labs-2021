@@ -20,6 +20,7 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"math/rand"
 	"sort"
 	"sync"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -116,14 +118,13 @@ func (rf *Raft) GetState() (int, bool) {
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
@@ -131,19 +132,21 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []logEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		DPrintf("read persist error\n")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -200,7 +203,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 	stepAside := false
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
+		rf.persist()
 		rf.votedFor = -1
+		rf.persist()
 		if rf.state == Leader || rf.state == Candidate {
 			stepAside = true
 		}
@@ -219,6 +224,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && isUpToDate {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
+		rf.persist()
 
 		rf.rtFlag = true
 		rf.mu.Unlock()
@@ -310,6 +316,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.persist()
 	}
 	rf.state = Follower
 	reply.Term = rf.currentTerm
@@ -346,28 +353,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.log = rf.log[:idx]
 			// Append any new entries not already in the log
 			rf.log = append(rf.log, args.Entries[endIdx:]...)
+			rf.persist()
 		} else {
 			if idx == len(rf.log) {
 				// Append any new entries not already in the log
 				rf.log = rf.log[:args.PrevLogIndex+1]
 				rf.log = append(rf.log, args.Entries...)
+				rf.persist()
 			}
 		}
 
 		// If leaderCommit > commitIndex, set commitIndex =
 		// min(leaderCommit, index of last new entry)
 		if args.LeaderCommit > rf.commitIndex {
-			// idx := rf.commitIndex + 1
-
 			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
-
-			// for i := idx; i <= rf.commitIndex; i++ { // TODO🔧: wrap it as a function!
-			// 	logCommited := rf.log[i]
-			// 	command := logCommited.Command
-			// 	index := i
-			// 	rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: index + 1}
-			// 	DPrintf("[N%d]: commit log[%d]\n", rf.me, i)
-			// }
 		}
 	}
 
@@ -419,6 +418,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	log := logEntry{command, rf.currentTerm}
 	rf.log = append(rf.log, log)
+	rf.persist()
 	DPrintf("[L%d] appends new log at %d.\n", rf.me, index-1)
 
 	rf.matchIndex[rf.me] = len(rf.log) - 1
@@ -467,10 +467,10 @@ func (rf *Raft) election(args *RequestVoteArgs) {
 		go func(int) {
 			ok := rf.sendRequestVote(idx, args, reply)
 			rf.mu.Lock()
-			// if ok && rf.state == Candidate && rf.currentTerm == args.Term && reply.Term == rf.currentTerm {
 			if ok && rf.state == Candidate && rf.currentTerm == args.Term {
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
+					rf.persist()
 					rf.state = Follower
 
 					if !isFinished {
@@ -554,6 +554,7 @@ func (rf *Raft) ticker() {
 					rf.currentTerm++
 					rf.state = Candidate
 					rf.votedFor = rf.me
+					rf.persist()
 				}
 				rf.mu.Unlock()
 			}
@@ -630,7 +631,9 @@ func (rf *Raft) ticker() {
 							} else {
 								args.PrevLogTerm = (rf.log[rf.nextIndex[idx]-1]).Term
 							}
-							args.Entries = rf.log[rf.nextIndex[idx]:len(rf.log)]
+							// args.Entries = rf.log[rf.nextIndex[idx]:len(rf.log)] // ❌ 这里的赋值可能有一个很微妙的错误，可能会导致发送时的race condition
+							args.Entries = make([]logEntry, len(rf.log[rf.nextIndex[idx]:len(rf.log)]))
+							copy(args.Entries, rf.log[rf.nextIndex[idx]:len(rf.log)])
 							args.LeaderCommit = rf.commitIndex
 							rf.mu.Unlock()
 
@@ -641,6 +644,7 @@ func (rf *Raft) ticker() {
 								if reply.Term > rf.currentTerm {
 									DPrintf("[L%d] steps aside because it receives [N%d]'s reply which contains higher term.\n", rf.me, idx)
 									rf.currentTerm = reply.Term
+									rf.persist()
 									rf.state = Follower
 									rf.rtFlag = true
 									rf.mu.Unlock()
@@ -664,24 +668,15 @@ func (rf *Raft) ticker() {
 									N := cp[(len(cp)-1)/2]
 
 									if N > rf.commitIndex && (rf.log[N]).Term == rf.currentTerm {
-										// idx := rf.commitIndex + 1
-
 										rf.commitIndex = N
-
-										// for i := idx; i <= rf.commitIndex; i++ {
-										// 	logCommited := rf.log[i]
-										// 	command := logCommited.Command
-										// 	index := i
-										// 	rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: index + 1}
-										// 	DPrintf("[L%d] commits log[%d]\n", rf.me, i)
-										// }
 										rf.mu.Unlock()
 									} else {
 										rf.mu.Unlock()
 									}
 								} else {
 									DPrintf("[L%d] receives [N%d]'s negative reply.\n", rf.me, idx)
-									rf.nextIndex[idx]--
+									//rf.nextIndex[idx]-- // ❌❌❌
+									rf.nextIndex[idx] = args.PrevLogIndex
 									rf.mu.Unlock()
 								}
 							} else {
@@ -723,6 +718,7 @@ func (rf *Raft) ticker() {
 									if reply.Term > rf.currentTerm {
 										DPrintf("[L%d] steps aside because it receives [N%d]'s reply which contains higher term.\n", rf.me, idx)
 										rf.currentTerm = reply.Term
+										rf.persist()
 										rf.state = Follower
 										rf.rtFlag = true
 										rf.mu.Unlock()
@@ -746,24 +742,15 @@ func (rf *Raft) ticker() {
 										N := cp[(len(cp)-1)/2]
 
 										if N > rf.commitIndex && (rf.log[N]).Term == rf.currentTerm {
-											// idx := rf.commitIndex + 1
-
 											rf.commitIndex = N
-
-											// for i := idx; i <= rf.commitIndex; i++ {
-											// 	logCommited := rf.log[i]
-											// 	command := logCommited.Command
-											// 	index := i
-											// 	rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: index + 1}
-											// 	DPrintf("[L%d]: commit log[%d]\n", rf.me, i)
-											// }
 											rf.mu.Unlock()
 										} else {
 											rf.mu.Unlock()
 										}
 									} else {
 										DPrintf("[L%d] receives [N%d]'s negative reply.\n", rf.me, idx)
-										rf.nextIndex[idx]--
+										//rf.nextIndex[idx]-- // ❌❌❌
+										rf.nextIndex[idx] = args.PrevLogIndex
 										rf.mu.Unlock()
 									}
 								} else {
@@ -787,7 +774,7 @@ func (rf *Raft) ticker() {
 	}
 }
 
-func (rf *Raft) applyer() {
+func (rf *Raft) applier() {
 	prevCommitIdx := -1
 	for !rf.killed() {
 		rf.mu.Lock()
@@ -848,7 +835,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-	go rf.applyer()
+	go rf.applier()
 
 	return rf
 }
@@ -857,12 +844,4 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 // 1. AppendEntries RPC retransmissions that rely only on ok returns are too long.
 
-// 2. "If election timeout elapses without receiving AppendEntries
-// RPC from current leader or granting vote to candidate: convert to candidate"
-// I didn't consider the word "current"...
-
-// 3. Leader should not change its state to follower after being killed
-
-// 4. You'll want to have a separate long-running goroutine that sends
-// committed log entries in order on the applyCh. It must be separate,
-// since sending on the applyCh can block.
+// 2. Leader should not change its state to follower after being killed
