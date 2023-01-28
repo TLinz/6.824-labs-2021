@@ -61,6 +61,8 @@ const (
 	Leader
 )
 
+var role = []string{"F", "C", "L"}
+
 type logEntry struct {
 	Command interface{}
 	Term    int
@@ -93,16 +95,11 @@ type Raft struct {
 	matchIndex []int
 
 	rtFlag bool
-
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
-
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
 	var isleader bool
 	// Your code here (2A).
@@ -195,19 +192,21 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
-		DPrintf("[N%d]'s term %d > [C%d]'s term %d, refuse to vote.\n", rf.me, rf.currentTerm, args.CandidateId, args.Term)
+		DPrintf("RV [%s%d] refuses to vote for [C%d]. (T1:%d \\ T2:%d)\n", role[rf.state], rf.me, args.CandidateId, rf.currentTerm, args.Term)
 		rf.mu.Unlock()
 		return
 	}
 
 	stepAside := false
 	if args.Term > rf.currentTerm {
+		DPrintf("RV [%s%d] T:%d->%d.\n", role[rf.state], rf.me, rf.currentTerm, args.Term)
 		rf.currentTerm = args.Term
 		rf.persist()
 		rf.votedFor = -1
 		rf.persist()
 		if rf.state == Leader || rf.state == Candidate {
 			stepAside = true
+			DPrintf("RV [%s%d] becomes follower before voting(or not) for [C%d]. (T1:%d \\ T2:%d)\n", role[rf.state], rf.me, args.CandidateId, rf.currentTerm, args.Term)
 		}
 		rf.state = Follower
 	}
@@ -225,6 +224,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.persist()
+		DPrintf("RV [%s%d] votes for [C%d]. (T1:%d T2:%d)\n", role[rf.state], rf.me, args.CandidateId, rf.currentTerm, args.Term)
 
 		rf.rtFlag = true
 		rf.mu.Unlock()
@@ -233,9 +233,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 		}
 	} else {
 		reply.VoteGranted = false
+		DPrintf("RV [%s%d] refuses to vote for [C%d]. (T1:%d VF:%d UTD:%v \\ T2:%d)\n", role[rf.state], rf.me, args.CandidateId, rf.currentTerm, rf.votedFor, isUpToDate, args.Term)
+
 		if stepAside {
 			rf.rtFlag = true
-			rf.mu.Unlock() // Must unlock after assigning true to rf.rtFlag!
+			rf.mu.Unlock()
 			if len(rf.rtCh) == 0 {
 				rf.rtCh <- 1
 			}
@@ -309,11 +311,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		DPrintf("AE [%s%d] replies false to [L%d]. (T1:%d \\ T2:%d)\n", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
 		rf.mu.Unlock()
 		return
 	}
 
 	if args.Term > rf.currentTerm {
+		DPrintf("AE [%s%d] T:%d->%d.\n", role[rf.state], rf.me, rf.currentTerm, args.Term)
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.persist()
@@ -325,9 +329,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// whose term matches prevLogTerm (§5.3)
 	if args.PrevLogIndex != -1 && (args.PrevLogIndex >= len(rf.log) || (rf.log[args.PrevLogIndex]).Term != args.PrevLogTerm) {
 		reply.Success = false
+		DPrintf("AE [%s%d] replies false to [L%d] (Consistency check failure). (T1:%d \\ T2:%d)\n", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
 	} else {
 		reply.Success = true
-
+		DPrintf("AE [%s%d] replies true to [L%d]. (T1:%d \\ T2:%d)\n", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
 		// If an existing entry conflicts with a new one (same index but different terms),
 		// delete the existing entry and all that follow it (§5.3)
 		idx := args.PrevLogIndex + 1
@@ -367,6 +372,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// min(leaderCommit, index of last new entry)
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+			DPrintf("AE [%s%d] commitIndex -> %d.\n", role[rf.state], rf.me, rf.commitIndex)
 		}
 	}
 
@@ -419,7 +425,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	log := logEntry{command, rf.currentTerm}
 	rf.log = append(rf.log, log)
 	rf.persist()
-	DPrintf("[L%d] appends new log at %d.\n", rf.me, index-1)
+	DPrintf("[%s%d] appends new log at %d.\n", role[rf.state], rf.me, index-1)
 
 	rf.matchIndex[rf.me] = len(rf.log) - 1
 
@@ -452,7 +458,7 @@ func (rf *Raft) election(args *RequestVoteArgs) {
 	rf.mu.Lock()
 	voteSum := 0
 	isFinished := false
-	DPrintf("[N%d] starts election...\n", rf.me)
+	DPrintf("[%s%d] starts election...\n", role[rf.state], rf.me)
 	rf.mu.Unlock()
 
 	for i := range rf.peers {
@@ -465,10 +471,15 @@ func (rf *Raft) election(args *RequestVoteArgs) {
 		idx := i
 		// Send RequestVote RPCs concurrently.
 		go func(int) {
+			rf.mu.Lock()
+			DPrintf("[%s%d] sends RequestVote to [N%d]...", role[rf.state], rf.me, idx)
+			rf.mu.Unlock()
+
 			ok := rf.sendRequestVote(idx, args, reply)
 			rf.mu.Lock()
 			if ok && rf.state == Candidate && rf.currentTerm == args.Term {
 				if reply.Term > rf.currentTerm {
+					DPrintf("[C%d]'s election failed, becomming follower. (T1:%d \\ RNO: %d T2:%d)\n", rf.me, rf.currentTerm, idx, reply.Term)
 					rf.currentTerm = reply.Term
 					rf.persist()
 					rf.state = Follower
@@ -487,7 +498,7 @@ func (rf *Raft) election(args *RequestVoteArgs) {
 					voteSum++
 					if (voteSum+1)*2 > len(rf.peers) {
 						rf.state = Leader
-						DPrintf("[L%d] becomes the new leader!\n", rf.me)
+						DPrintf("[C%d] becomes the new leader!\n", rf.me)
 
 						for i := range rf.matchIndex {
 							rf.matchIndex[i] = -1
@@ -509,7 +520,6 @@ func (rf *Raft) election(args *RequestVoteArgs) {
 				}
 				rf.mu.Unlock()
 			} else {
-				DPrintf("[C%d] does not receive [N%d]'s vote reply...\n", rf.me, idx)
 				rf.mu.Unlock()
 			}
 		}(idx)
@@ -526,12 +536,12 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 
 		interval := 350 + rand.Intn(250)
-		DPrintf("[N%d] reset timer with interval %dms.\n", rf.me, interval)
 
 		rf.mu.Lock() // May stuck here if send data to rf.rtCh or ch(election) while holding the lock.
+		// DPrintf("[%s%d] reset timer with interval %dms.\n", role[rf.state], rf.me, interval)
 
 		if rf.rtFlag {
-			DPrintf("[N%d] Warning: atomic0!\n", rf.me)
+			DPrintf("Warning: atomic 0!\n")
 			<-rf.rtCh
 			rf.rtFlag = false
 		}
@@ -547,7 +557,7 @@ func (rf *Raft) ticker() {
 				// Timeout, start election...
 				rf.mu.Lock()
 				if rf.rtFlag {
-					DPrintf("[N%d] Warning: atomic1!\n", rf.me)
+					DPrintf("Warning: atomic 1!\n")
 					<-rf.rtCh
 					rf.rtFlag = false
 				} else {
@@ -577,7 +587,7 @@ func (rf *Raft) ticker() {
 			case <-time.After(time.Duration(interval) * time.Millisecond):
 				rf.mu.Lock()
 				if rf.rtFlag {
-					DPrintf("[N%d] Warning: atomic2!\n", rf.me)
+					DPrintf("Warning: atomic 2!\n")
 					<-rf.rtCh
 					rf.rtFlag = false
 				} else if rf.state == Candidate {
@@ -635,14 +645,14 @@ func (rf *Raft) ticker() {
 							args.Entries = make([]logEntry, len(rf.log[rf.nextIndex[idx]:len(rf.log)]))
 							copy(args.Entries, rf.log[rf.nextIndex[idx]:len(rf.log)])
 							args.LeaderCommit = rf.commitIndex
+							DPrintf("[%s%d] sends AppendEntries to [N%d]...\n", role[rf.state], rf.me, idx)
 							rf.mu.Unlock()
 
-							DPrintf("[L%d] is sending log entries to [N%d]...\n", rf.me, idx)
 							ok := rf.sendAppendEntries(idx, args, reply)
 							rf.mu.Lock()
 							if ok && rf.state == Leader && rf.currentTerm == args.Term {
 								if reply.Term > rf.currentTerm {
-									DPrintf("[L%d] steps aside because it receives [N%d]'s reply which contains higher term.\n", rf.me, idx)
+									DPrintf("[L%d] steps aside. (T1:%d \\ RNO: %d T2:%d)\n", rf.me, rf.currentTerm, idx, reply.Term)
 									rf.currentTerm = reply.Term
 									rf.persist()
 									rf.state = Follower
@@ -655,7 +665,6 @@ func (rf *Raft) ticker() {
 								}
 
 								if reply.Success {
-									DPrintf("[L%d] receives [N%d]'s success reply.\n", rf.me, idx)
 									rf.matchIndex[idx] = args.PrevLogIndex + len(args.Entries)
 									rf.nextIndex[idx] = args.PrevLogIndex + len(args.Entries) + 1
 
@@ -669,12 +678,12 @@ func (rf *Raft) ticker() {
 
 									if N > rf.commitIndex && (rf.log[N]).Term == rf.currentTerm {
 										rf.commitIndex = N
+										DPrintf("[L%d] commitIndex -> %d.\n", rf.me, rf.commitIndex)
 										rf.mu.Unlock()
 									} else {
 										rf.mu.Unlock()
 									}
 								} else {
-									DPrintf("[L%d] receives [N%d]'s negative reply.\n", rf.me, idx)
 									//rf.nextIndex[idx]-- // ❌❌❌
 									rf.nextIndex[idx] = args.PrevLogIndex
 									rf.mu.Unlock()
@@ -684,7 +693,6 @@ func (rf *Raft) ticker() {
 									rf.mu.Unlock()
 									break
 								}
-								DPrintf("[L%d] does not receive [N%d]'s AppendEntries reply...\n", rf.me, idx)
 								rf.mu.Unlock()
 							}
 						} else {
@@ -707,7 +715,7 @@ func (rf *Raft) ticker() {
 							}
 							args.LeaderCommit = rf.commitIndex
 
-							DPrintf("[L%d] is sending heartbeat to [N%d]...\n", rf.me, idx)
+							DPrintf("[%s%d] sends HeartBeat to [N%d]...\n", role[rf.state], rf.me, idx)
 							rf.mu.Unlock()
 
 							go func(int) {
@@ -716,7 +724,7 @@ func (rf *Raft) ticker() {
 								if ok && rf.state == Leader && rf.currentTerm == args.Term {
 
 									if reply.Term > rf.currentTerm {
-										DPrintf("[L%d] steps aside because it receives [N%d]'s reply which contains higher term.\n", rf.me, idx)
+										DPrintf("[L%d] steps aside. (T1:%d \\ RNO: %d T2:%d)\n", rf.me, rf.currentTerm, idx, reply.Term)
 										rf.currentTerm = reply.Term
 										rf.persist()
 										rf.state = Follower
@@ -729,7 +737,6 @@ func (rf *Raft) ticker() {
 									}
 
 									if reply.Success {
-										DPrintf("[L%d] receives [N%d]'s success reply.\n", rf.me, idx)
 										rf.matchIndex[idx] = args.PrevLogIndex + len(args.Entries)
 										rf.nextIndex[idx] = args.PrevLogIndex + len(args.Entries) + 1
 
@@ -742,19 +749,18 @@ func (rf *Raft) ticker() {
 										N := cp[(len(cp)-1)/2]
 
 										if N > rf.commitIndex && (rf.log[N]).Term == rf.currentTerm {
+											DPrintf("[L%d] commitIndex -> %d.\n", rf.me, rf.commitIndex)
 											rf.commitIndex = N
 											rf.mu.Unlock()
 										} else {
 											rf.mu.Unlock()
 										}
 									} else {
-										DPrintf("[L%d] receives [N%d]'s negative reply.\n", rf.me, idx)
 										//rf.nextIndex[idx]-- // ❌❌❌
 										rf.nextIndex[idx] = args.PrevLogIndex
 										rf.mu.Unlock()
 									}
 								} else {
-									DPrintf("[L%d] does not receive [N%d]'s heartbeat reply...\n", rf.me, idx)
 									rf.mu.Unlock()
 								}
 							}(idx)
@@ -788,7 +794,9 @@ func (rf *Raft) applier() {
 				command := logCommited.Command
 				index := i
 				rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: index + 1}
-				DPrintf("[L%d]: commit log[%d]\n", rf.me, i)
+				rf.mu.Lock()
+				DPrintf("[%s%d] commits log[%d]\n", role[rf.state], rf.me, i)
+				rf.mu.Unlock()
 			}
 			prevCommitIdx = cIdx
 		}
