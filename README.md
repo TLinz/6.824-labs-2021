@@ -1,7 +1,7 @@
 - [x]  Lab1 : MapReduce
 - [x]  Lab2A: leader election
 - [x]  Lab2B: log
-- [ ]  Lab2C: persistence
+- [x]  Lab2C: persistence
 - [ ]  Lab2D: log compaction
 - [ ]  Lab3A: key/value service without snapshots
 - [ ]  Lab3B: Key/value service with snapshots

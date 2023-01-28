@@ -295,6 +295,10 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	// For fast log backtracking.
+	ConflictIndex int
+	ConflictTerm  int
 }
 
 func min(x, y int) int {
@@ -302,6 +306,26 @@ func min(x, y int) int {
 		return x
 	}
 	return y
+}
+
+// Return the index of first log whose entry has corresponding term.
+func firstLog(logs []logEntry, term int) int {
+	for i := range logs {
+		if logs[i].Term == term {
+			return i
+		}
+	}
+	return -1
+}
+
+// Return the index of last log whose entry has corresponding term.
+func lastLog(logs []logEntry, term int) int {
+	for i := len(logs) - 1; i >= 0; i-- {
+		if logs[i].Term == term {
+			return i
+		}
+	}
+	return -1
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -330,6 +354,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex != -1 && (args.PrevLogIndex >= len(rf.log) || (rf.log[args.PrevLogIndex]).Term != args.PrevLogTerm) {
 		reply.Success = false
 		DPrintf("AE [%s%d] replies false to [L%d] (Consistency check failure). (T1:%d \\ T2:%d)\n", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
+
+		if args.PrevLogIndex >= len(rf.log) {
+			reply.ConflictIndex = len(rf.log)
+			reply.ConflictTerm = -1
+		} else {
+			reply.ConflictTerm = (rf.log[args.PrevLogIndex]).Term
+			reply.ConflictIndex = firstLog(rf.log, reply.ConflictTerm)
+		}
 	} else {
 		reply.Success = true
 		DPrintf("AE [%s%d] replies true to [L%d]. (T1:%d \\ T2:%d)\n", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
@@ -628,29 +660,42 @@ func (rf *Raft) ticker() {
 							break
 						}
 
+						// Sending heartbeat periodically.
+						if rf.state != Leader {
+							rf.mu.Unlock()
+							break
+						}
+
+						args := &AppendEntriesArgs{}
+						reply := &AppendEntriesReply{}
+
+						args.Term = rf.currentTerm
+						args.LeaderId = rf.me
+						args.PrevLogIndex = rf.nextIndex[idx] - 1
+						if args.PrevLogIndex == -1 {
+							args.PrevLogTerm = -1
+						} else {
+							args.PrevLogTerm = (rf.log[rf.nextIndex[idx]-1]).Term
+						}
+						args.LeaderCommit = rf.commitIndex
+
+						originalLogs := make([]logEntry, len(rf.log))
+						copy(originalLogs, rf.log)
+
 						if rf.nextIndex[idx] != len(rf.log) {
-
-							args := &AppendEntriesArgs{}
-							reply := &AppendEntriesReply{}
-
-							args.Term = rf.currentTerm
-							args.LeaderId = rf.me
-							args.PrevLogIndex = rf.nextIndex[idx] - 1
-							if args.PrevLogIndex == -1 {
-								args.PrevLogTerm = -1
-							} else {
-								args.PrevLogTerm = (rf.log[rf.nextIndex[idx]-1]).Term
-							}
-							// args.Entries = rf.log[rf.nextIndex[idx]:len(rf.log)] // ❌ 这里的赋值可能有一个很微妙的错误，可能会导致发送时的race condition
+							// args.Entries = rf.log[rf.nextIndex[idx]:len(rf.log)] // ❌ There may be a subtle error in the assignment here, which may cause a race condition later.
 							args.Entries = make([]logEntry, len(rf.log[rf.nextIndex[idx]:len(rf.log)]))
 							copy(args.Entries, rf.log[rf.nextIndex[idx]:len(rf.log)])
-							args.LeaderCommit = rf.commitIndex
-							DPrintf("[%s%d] sends AppendEntries to [N%d]...\n", role[rf.state], rf.me, idx)
-							rf.mu.Unlock()
+						}
 
+						DPrintf("[%s%d] sends AppendEntries to [N%d]...\n", role[rf.state], rf.me, idx)
+						rf.mu.Unlock()
+
+						go func(int) {
 							ok := rf.sendAppendEntries(idx, args, reply)
 							rf.mu.Lock()
 							if ok && rf.state == Leader && rf.currentTerm == args.Term {
+
 								if reply.Term > rf.currentTerm {
 									DPrintf("[L%d] steps aside. (T1:%d \\ RNO: %d T2:%d)\n", rf.me, rf.currentTerm, idx, reply.Term)
 									rf.currentTerm = reply.Term
@@ -661,7 +706,7 @@ func (rf *Raft) ticker() {
 									if len(rf.rtCh) == 0 {
 										rf.rtCh <- 1
 									}
-									break
+									return
 								}
 
 								if reply.Success {
@@ -677,96 +722,28 @@ func (rf *Raft) ticker() {
 									N := cp[(len(cp)-1)/2]
 
 									if N > rf.commitIndex && (rf.log[N]).Term == rf.currentTerm {
-										rf.commitIndex = N
 										DPrintf("[L%d] commitIndex -> %d.\n", rf.me, rf.commitIndex)
+										rf.commitIndex = N
 										rf.mu.Unlock()
 									} else {
 										rf.mu.Unlock()
 									}
 								} else {
-									//rf.nextIndex[idx]-- // ❌❌❌
-									rf.nextIndex[idx] = args.PrevLogIndex
-									rf.mu.Unlock()
-								}
-							} else {
-								if rf.state != Leader {
-									rf.mu.Unlock()
-									break
-								}
-								rf.mu.Unlock()
-							}
-						} else {
-							// Sending heartbeat periodically.
-							if rf.state != Leader {
-								rf.mu.Unlock()
-								break
-							}
-
-							args := &AppendEntriesArgs{}
-							reply := &AppendEntriesReply{}
-
-							args.Term = rf.currentTerm
-							args.LeaderId = rf.me
-							args.PrevLogIndex = rf.nextIndex[idx] - 1
-							if args.PrevLogIndex == -1 {
-								args.PrevLogTerm = -1
-							} else {
-								args.PrevLogTerm = (rf.log[rf.nextIndex[idx]-1]).Term
-							}
-							args.LeaderCommit = rf.commitIndex
-
-							DPrintf("[%s%d] sends HeartBeat to [N%d]...\n", role[rf.state], rf.me, idx)
-							rf.mu.Unlock()
-
-							go func(int) {
-								ok := rf.sendAppendEntries(idx, args, reply)
-								rf.mu.Lock()
-								if ok && rf.state == Leader && rf.currentTerm == args.Term {
-
-									if reply.Term > rf.currentTerm {
-										DPrintf("[L%d] steps aside. (T1:%d \\ RNO: %d T2:%d)\n", rf.me, rf.currentTerm, idx, reply.Term)
-										rf.currentTerm = reply.Term
-										rf.persist()
-										rf.state = Follower
-										rf.rtFlag = true
-										rf.mu.Unlock()
-										if len(rf.rtCh) == 0 {
-											rf.rtCh <- 1
-										}
-										return
-									}
-
-									if reply.Success {
-										rf.matchIndex[idx] = args.PrevLogIndex + len(args.Entries)
-										rf.nextIndex[idx] = args.PrevLogIndex + len(args.Entries) + 1
-
-										// If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,
-										// and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
-										cp := make([]int, len(rf.matchIndex))
-										copy(cp, rf.matchIndex)
-										sort.Ints(cp)
-
-										N := cp[(len(cp)-1)/2]
-
-										if N > rf.commitIndex && (rf.log[N]).Term == rf.currentTerm {
-											DPrintf("[L%d] commitIndex -> %d.\n", rf.me, rf.commitIndex)
-											rf.commitIndex = N
-											rf.mu.Unlock()
-										} else {
-											rf.mu.Unlock()
-										}
+									// rf.nextIndex[idx]-- // ❌❌❌
+									// rf.nextIndex[idx] = args.PrevLogIndex
+									if reply.ConflictTerm != -1 && lastLog(originalLogs, reply.ConflictTerm) != -1 {
+										rf.nextIndex[idx] = lastLog(originalLogs, reply.ConflictTerm) + 1
 									} else {
-										//rf.nextIndex[idx]-- // ❌❌❌
-										rf.nextIndex[idx] = args.PrevLogIndex
-										rf.mu.Unlock()
+										rf.nextIndex[idx] = reply.ConflictIndex
 									}
-								} else {
 									rf.mu.Unlock()
 								}
-							}(idx)
+							} else {
+								rf.mu.Unlock()
+							}
+						}(idx)
 
-							time.Sleep(150 * time.Millisecond)
-						}
+						time.Sleep(150 * time.Millisecond)
 					}
 				}(idx)
 			}
@@ -850,6 +827,4 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 // TOTHINK🧠:
 
-// 1. AppendEntries RPC retransmissions that rely only on ok returns are too long.
-
-// 2. Leader should not change its state to follower after being killed
+// 1. Leader should not change its state to follower after being killed, but if so, it also seems ok.
