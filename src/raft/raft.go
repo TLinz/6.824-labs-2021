@@ -567,7 +567,7 @@ func (rf *Raft) ticker() {
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 
-		interval := 350 + rand.Intn(250)
+		interval := 500 + rand.Intn(250) // Need to be big enough to pass 2c's unreliable test.
 
 		rf.mu.Lock() // May stuck here if send data to rf.rtCh or ch(election) while holding the lock.
 		// DPrintf("[%s%d] reset timer with interval %dms.\n", role[rf.state], rf.me, interval)
@@ -743,7 +743,7 @@ func (rf *Raft) ticker() {
 							}
 						}(idx)
 
-						time.Sleep(150 * time.Millisecond)
+						time.Sleep(105 * time.Millisecond) // Need to be small enough to pass 2c's unreliable test.
 					}
 				}(idx)
 			}
@@ -828,3 +828,5 @@ func Make(peers []*labrpc.ClientEnd, me int,
 // TOTHINK🧠:
 
 // 1. Leader should not change its state to follower after being killed, but if so, it also seems ok.
+
+// 2. Maybe I can use condition viarable in applier rather than commiting periodically.
