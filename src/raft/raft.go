@@ -794,9 +794,3 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	return rf
 }
-
-// TOTHINK🧠:
-
-// 1. Leader should not change its state to follower after being killed, but if so, it also seems ok.
-
-// 2. Maybe I can use condition viarable in applier rather than commiting periodically.
