@@ -365,43 +365,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} else {
 		reply.Success = true
 		DPrintf("AE [%s%d] replies true to [L%d]. (T1:%d \\ T2:%d)\n", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
-		// If an existing entry conflicts with a new one (same index but different terms),
-		// delete the existing entry and all that follow it (§5.3)
-		idx := args.PrevLogIndex + 1
-		isConflict := false
-		endIdx := -1
-		if len(rf.log) > args.PrevLogIndex+1 {
-			for i := range args.Entries {
-				if idx == len(rf.log) {
-					break
-				}
 
-				if args.Entries[i] == rf.log[idx] {
-					idx++
-				} else {
-					isConflict = true
-					endIdx = i
-					break
-				}
-			}
-		}
+		rf.log = rf.log[:args.PrevLogIndex+1]
+		rf.log = append(rf.log, args.Entries...)
+		rf.persist()
 
-		if isConflict {
-			rf.log = rf.log[:idx]
-			// Append any new entries not already in the log
-			rf.log = append(rf.log, args.Entries[endIdx:]...)
-			rf.persist()
-		} else {
-			if idx == len(rf.log) {
-				// Append any new entries not already in the log
-				rf.log = rf.log[:args.PrevLogIndex+1]
-				rf.log = append(rf.log, args.Entries...)
-				rf.persist()
-			}
-		}
-
-		// If leaderCommit > commitIndex, set commitIndex =
-		// min(leaderCommit, index of last new entry)
+		// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
 			DPrintf("AE [%s%d] commitIndex -> %d.\n", role[rf.state], rf.me, rf.commitIndex)
@@ -721,6 +690,7 @@ func (rf *Raft) ticker() {
 
 									N := cp[(len(cp)-1)/2]
 
+									// Leader can only commit log entries of its own term.
 									if N > rf.commitIndex && (rf.log[N]).Term == rf.currentTerm {
 										DPrintf("[L%d] commitIndex -> %d.\n", rf.me, rf.commitIndex)
 										rf.commitIndex = N
