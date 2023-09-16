@@ -66,6 +66,7 @@ var role = []string{"F", "C", "L"}
 type logEntry struct {
 	Command interface{}
 	Term    int
+	Index   int
 }
 
 // A Go object implementing a single Raft peer.
@@ -95,6 +96,31 @@ type Raft struct {
 	matchIndex []int
 
 	rtFlag bool
+}
+
+func (rf *Raft) getLogEntry(index int) *logEntry {
+	for i := range rf.log {
+		if rf.log[i].Index == index {
+			return &rf.log[i]
+		}
+	}
+	return nil
+}
+
+func (rf *Raft) getLastLogIndex() int {
+	if len(rf.log) == 0 {
+		return -1
+	}
+	return rf.log[len(rf.log)-1].Index
+}
+
+func (rf *Raft) getLogRealIndex(index int) int {
+	for i := range rf.log {
+		if rf.log[i].Index == index {
+			return i
+		}
+	}
+	return -1
 }
 
 // return currentTerm and whether this server
@@ -215,7 +241,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 	isUpToDate := true
 	if len(rf.log) != 0 {
 		lastLog := rf.log[len(rf.log)-1]
-		isUpToDate = args.LastLogTerm > lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex >= len(rf.log)-1)
+		isUpToDate = args.LastLogTerm > lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex >= rf.log[len(rf.log)-1].Index)
 	}
 
 	// 2. If votedFor is null or candidateId, and candidate’s log is at
@@ -312,7 +338,7 @@ func min(x, y int) int {
 func firstLog(logs []logEntry, term int) int {
 	for i := range logs {
 		if logs[i].Term == term {
-			return i
+			return logs[i].Index
 		}
 	}
 	return -1
@@ -322,7 +348,7 @@ func firstLog(logs []logEntry, term int) int {
 func lastLog(logs []logEntry, term int) int {
 	for i := len(logs) - 1; i >= 0; i-- {
 		if logs[i].Term == term {
-			return i
+			return logs[i].Index
 		}
 	}
 	return -1
@@ -351,15 +377,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// Reply false if log doesn’t contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (§5.3)
-	if args.PrevLogIndex != -1 && (args.PrevLogIndex >= len(rf.log) || (rf.log[args.PrevLogIndex]).Term != args.PrevLogTerm) {
+	if args.PrevLogIndex != -1 && (args.PrevLogIndex > rf.getLastLogIndex() || rf.getLogEntry(args.PrevLogIndex).Term != args.PrevLogTerm) {
 		reply.Success = false
 		DPrintf("AE [%s%d] replies false to [L%d] (Consistency check failure). (T1:%d \\ T2:%d)\n", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
 
-		if args.PrevLogIndex >= len(rf.log) {
-			reply.ConflictIndex = len(rf.log)
+		if args.PrevLogIndex > rf.getLastLogIndex() {
+			reply.ConflictIndex = rf.getLastLogIndex() + 1
 			reply.ConflictTerm = -1
 		} else {
-			reply.ConflictTerm = (rf.log[args.PrevLogIndex]).Term
+			reply.ConflictTerm = rf.getLogEntry(args.PrevLogIndex).Term
 			reply.ConflictIndex = firstLog(rf.log, reply.ConflictTerm)
 		}
 	} else {
@@ -372,7 +398,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+			rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
 			DPrintf("AE [%s%d] commitIndex -> %d.\n", role[rf.state], rf.me, rf.commitIndex)
 		}
 	}
@@ -419,19 +445,19 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 
-	index := len(rf.log) + 1
+	index := rf.getLastLogIndex() + 1
 	term := rf.currentTerm
 
 	// Your code here (2B).
-	log := logEntry{command, rf.currentTerm}
+	log := logEntry{command, rf.currentTerm, index}
 	rf.log = append(rf.log, log)
 	rf.persist()
-	DPrintf("[%s%d] appends new log at %d.\n", role[rf.state], rf.me, index-1)
+	DPrintf("[%s%d] appends new log at %d.\n", role[rf.state], rf.me, index)
 
-	rf.matchIndex[rf.me] = len(rf.log) - 1
+	rf.matchIndex[rf.me] = rf.getLastLogIndex()
 
 	rf.mu.Unlock()
-	return index, term, true
+	return index + 1, term, true
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -506,7 +532,7 @@ func (rf *Raft) election(args *RequestVoteArgs) {
 						}
 
 						for i := range rf.nextIndex {
-							rf.nextIndex[i] = len(rf.log)
+							rf.nextIndex[i] = rf.getLastLogIndex() + 1
 						}
 
 						if !isFinished {
@@ -574,11 +600,11 @@ func (rf *Raft) ticker() {
 			args := &RequestVoteArgs{}
 			args.Term = rf.currentTerm
 			args.CandidateId = rf.me
-			args.LastLogIndex = len(rf.log) - 1
+			args.LastLogIndex = rf.getLastLogIndex()
 			if args.LastLogIndex == -1 {
 				args.LastLogTerm = -1
 			} else {
-				args.LastLogTerm = rf.log[args.LastLogIndex].Term
+				args.LastLogTerm = rf.getLogEntry(args.LastLogIndex).Term
 			}
 			rf.mu.Unlock()
 
@@ -644,17 +670,18 @@ func (rf *Raft) ticker() {
 						if args.PrevLogIndex == -1 {
 							args.PrevLogTerm = -1
 						} else {
-							args.PrevLogTerm = (rf.log[rf.nextIndex[idx]-1]).Term
+							args.PrevLogTerm = rf.getLogEntry(args.PrevLogIndex).Term
 						}
 						args.LeaderCommit = rf.commitIndex
 
 						originalLogs := make([]logEntry, len(rf.log))
 						copy(originalLogs, rf.log)
 
-						if rf.nextIndex[idx] != len(rf.log) {
+						if rf.nextIndex[idx] != rf.getLastLogIndex()+1 {
 							// args.Entries = rf.log[rf.nextIndex[idx]:len(rf.log)] // ❌ There may be a subtle error in the assignment here, which may cause a race condition later.
-							args.Entries = make([]logEntry, len(rf.log[rf.nextIndex[idx]:len(rf.log)]))
-							copy(args.Entries, rf.log[rf.nextIndex[idx]:len(rf.log)])
+							// args.Entries = make([]logEntry, len(rf.log[rf.nextIndex[idx]:len(rf.log)]))
+							args.Entries = make([]logEntry, len(rf.log[rf.getLogRealIndex(rf.nextIndex[idx]):]))
+							copy(args.Entries, rf.log[rf.getLogRealIndex(rf.nextIndex[idx]):])
 						}
 
 						DPrintf("[%s%d] sends AppendEntries to [N%d]...\n", role[rf.state], rf.me, idx)
@@ -691,7 +718,7 @@ func (rf *Raft) ticker() {
 									N := cp[(len(cp)-1)/2]
 
 									// Leader can only commit log entries of its own term.
-									if N > rf.commitIndex && (rf.log[N]).Term == rf.currentTerm {
+									if N > rf.commitIndex && (rf.getLogEntry(N)).Term == rf.currentTerm {
 										DPrintf("[L%d] commitIndex -> %d.\n", rf.me, rf.commitIndex)
 										rf.commitIndex = N
 										rf.mu.Unlock()
@@ -736,7 +763,7 @@ func (rf *Raft) applier() {
 		if prevCommitIdx != cIdx {
 			for i := prevCommitIdx + 1; i <= cIdx; i++ {
 				rf.mu.Lock()
-				logCommited := rf.log[i]
+				logCommited := rf.getLogEntry(i)
 				rf.mu.Unlock()
 				command := logCommited.Command
 				index := i
