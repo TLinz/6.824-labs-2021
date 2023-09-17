@@ -102,7 +102,7 @@ type Raft struct {
 	lastIncludedTerm  int
 }
 
-// Too slow...
+// Too slow...but feasible when SnapShotInterval is small.
 func (rf *Raft) getLogEntry(index int) *logEntry {
 	for i := range rf.log {
 		if rf.log[i].Index == index {
@@ -112,21 +112,10 @@ func (rf *Raft) getLogEntry(index int) *logEntry {
 
 	// Little trick, pretending to have a dummy log entry.
 	if index == rf.lastIncludedIndex {
-		Snlog("n%d fuck \n", rf.me)
 		return &logEntry{Term: rf.lastIncludedTerm, Index: rf.lastIncludedIndex}
-	}
-	Snlog("n%d fuckme! \n", rf.me)
-	if len(rf.log) != 0 {
-		Snlog("n%d lastIncludedIndex%d firstLogIndex%d\n", rf.me, rf.lastIncludedIndex, rf.log[0].Index)
-		Snlog("n%d arg index%d\n", rf.me, index)
 	}
 	return nil
 }
-
-// func (rf *Raft) getLogEntry(index int) logEntry {
-// 	// 'index' must be valid
-// 	return rf.log[index-rf.lastIncludedIndex-1]
-// }
 
 func (rf *Raft) getLastLogIndex() int {
 	if len(rf.log) == 0 {
@@ -170,7 +159,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.log)
 	e.Encode(rf.lastIncludedIndex)
 	e.Encode(rf.lastIncludedTerm)
-	e.Encode(rf.commitIndex)
+	e.Encode(rf.commitIndex) // actually don't need to...
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -222,27 +211,6 @@ func (rf *Raft) readPersist(data []byte) {
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-	// Your code here (2D).
-	// Snlog("n%d condinstallsn\n", rf.me)
-	// rf.mu.Lock()
-	// if lastIncludedIndex >= rf.getLastLogIndex() {
-	// 	rf.log = []logEntry{}
-	// 	rf.lastIncludedIndex = lastIncludedIndex
-	// 	rf.lastIncludedTerm = lastIncludedTerm
-	// 	rf.persist()
-	// 	rf.persister.SaveStateAndSnapshot(nil, snapshot)
-	// 	rf.mu.Unlock()
-	// 	return true
-	// }
-
-	// // rf.log = rf.log[args.LastIncludedIndex-olderLastIncludeIndex:]
-	// rf.log = rf.log[rf.getLogRealIndex(lastIncludedIndex)+1:]
-	// rf.lastIncludedIndex = lastIncludedIndex
-	// rf.lastIncludedTerm = lastIncludedTerm
-	// rf.persist()
-	// rf.persister.SaveStateAndSnapshot(nil, snapshot)
-	// rf.mu.Unlock()
-	// return true
 	return true
 }
 
@@ -439,7 +407,7 @@ func lastLog(logs []logEntry, term int) int {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 
-	if args.PrevLogIndex < rf.lastIncludedIndex { //难道有问题吗？？？？？
+	if args.PrevLogIndex < rf.lastIncludedIndex { // 是否有可能无法感知退位而引起脑裂？我认为有些危险。后面如果发生提交项冲突（极有可能为脑裂）并且刚好打印了下面的日志，则需修改逻辑
 		Snlog("Outdate AE: args.PrevLogIndex%d n%d's lastIncludedIndex%d\n", args.PrevLogIndex, rf.me, rf.lastIncludedIndex)
 		reply.OutDated = true
 		rf.mu.Unlock()
@@ -544,6 +512,15 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnap
 		rf.mu.Unlock()
 		return
 	}
+	/*-----------------------------------------------------------------*/
+	//一定要注意这两段的先后顺序，若相反则导致本应退位的leader退位失败发生脑裂
+	if args.Term > rf.currentTerm {
+		DPrintf("AE [%s%d] T:%d->%d.\n", role[rf.state], rf.me, rf.currentTerm, args.Term)
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		rf.state = Follower
+		rf.persist()
+	}
 
 	if args.LastIncludedTerm < rf.lastIncludedTerm || args.LastIncludedIndex <= rf.lastIncludedIndex {
 		reply.Term = rf.currentTerm
@@ -552,46 +529,20 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnap
 		rf.mu.Unlock()
 		return
 	}
+	/*-----------------------------------------------------------------*/
 
-	if args.Term > rf.currentTerm {
-		DPrintf("AE [%s%d] T:%d->%d.\n", role[rf.state], rf.me, rf.currentTerm, args.Term)
-		rf.currentTerm = args.Term
-		rf.votedFor = -1
-		rf.persist()
-	}
-	rf.state = Follower
 	reply.Term = rf.currentTerm
+	reply.Success = true
 
-	// reply.Term = rf.currentTerm
-	// reply.Success = true
-	// rf.rtFlag = true
-	// rf.mu.Unlock()
-	// Snlog("n%d applied command %d (snapshot)\n", rf.me, args.LastIncludedIndex)
-	// rf.applyCh <- ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotIndex: args.LastIncludedIndex + 1, SnapshotTerm: args.LastIncludedTerm}
+	rf.lastIncludedIndex = args.LastIncludedIndex
+	rf.lastIncludedTerm = args.LastIncludedTerm
 
 	if args.LastIncludedIndex >= rf.getLastLogIndex() {
 		rf.log = []logEntry{}
-		rf.lastIncludedIndex = args.LastIncludedIndex
-		rf.lastIncludedTerm = args.LastIncludedTerm
-		// rf.persist()
-		// rf.persister.SaveStateAndSnapshot(nil, args.Data)
-		rf.persister.SaveStateAndSnapshot(rf.getPersistState(), args.Data)
-		reply.Term = rf.currentTerm
-		reply.Success = true
-		// rf.rtFlag = true
-		// rf.mu.Unlock()
 	} else {
 		rf.log = rf.log[rf.getLogRealIndex(args.LastIncludedIndex)+1:]
-		rf.lastIncludedIndex = args.LastIncludedIndex
-		rf.lastIncludedTerm = args.LastIncludedTerm
-		// rf.persist()
-		// rf.persister.SaveStateAndSnapshot(nil, args.Data)
-		rf.persister.SaveStateAndSnapshot(rf.getPersistState(), args.Data)
-		reply.Term = rf.currentTerm
-		reply.Success = true
-		// rf.rtFlag = true
-		// rf.mu.Unlock()
 	}
+	rf.persister.SaveStateAndSnapshot(rf.getPersistState(), args.Data)
 
 	Snlog("n%d applied command %d (snapshot)\n", rf.me, args.LastIncludedIndex)
 	rf.applyCh <- ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotIndex: args.LastIncludedIndex + 1, SnapshotTerm: args.LastIncludedTerm}
@@ -601,7 +552,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnap
 	if len(rf.rtCh) == 0 {
 		rf.rtCh <- 1
 	}
-
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotRequest, reply *InstallSnapshotReply) bool {
@@ -902,6 +852,8 @@ func (rf *Raft) ticker() {
 										// }
 										rf.mu.Unlock()
 									} else {
+										// TODO: 我认为应该更新matchIndex和nextIndex，但return false只有两种可能， 排除任期拒绝外另一种
+										// 可能的话或许可以列为过期问题进行处理（这样的话反而不应该更新，过期值会覆盖新值）。
 										rf.mu.Unlock()
 									}
 
@@ -1112,4 +1064,5 @@ func Make(peers []*labrpc.ClientEnd, me int,
 2. lab2D中applier不能recover后不能提交崩溃前提交过的日志项，具体见config中的applierSnap()
 3. 注意service和raft层index对应关系，二者之间相差1，因此getLastIndex()不能随便返回-1，后面应该优化逻辑避免显示转换
 4. 注意保证持久化原子性，禁止persist()SaveStateAndSnapshot()组合使用，过程中如果发生crash会产生严重不一致，应该仅使用SaveStateAndSnapshot()
+5. 感知身份的变化（尤其退位）是最重要的，否则可能会发生脑裂
 */
