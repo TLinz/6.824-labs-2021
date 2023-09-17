@@ -116,6 +116,10 @@ func (rf *Raft) getLogEntry(index int) *logEntry {
 		return &logEntry{Term: rf.lastIncludedTerm, Index: rf.lastIncludedIndex}
 	}
 	Snlog("n%d fuckme! \n", rf.me)
+	if len(rf.log) != 0 {
+		Snlog("n%d lastIncludedIndex%d firstLogIndex%d\n", rf.me, rf.lastIncludedIndex, rf.log[0].Index)
+		Snlog("n%d arg index%d\n", rf.me, index)
+	}
 	return nil
 }
 
@@ -166,8 +170,22 @@ func (rf *Raft) persist() {
 	e.Encode(rf.log)
 	e.Encode(rf.lastIncludedIndex)
 	e.Encode(rf.lastIncludedTerm)
+	e.Encode(rf.commitIndex)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
+}
+
+func (rf *Raft) getPersistState() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
+	e.Encode(rf.commitIndex)
+	data := w.Bytes()
+	return data
 }
 
 // restore previously persisted state.
@@ -183,11 +201,13 @@ func (rf *Raft) readPersist(data []byte) {
 	var log []logEntry
 	var lastIncludedIndex int
 	var lastIncludedTerm int
+	var commitIndex int
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
 		d.Decode(&log) != nil ||
 		d.Decode(&lastIncludedIndex) != nil ||
-		d.Decode(&lastIncludedTerm) != nil {
+		d.Decode(&lastIncludedTerm) != nil ||
+		d.Decode(&commitIndex) != nil {
 		DPrintf("read persist error\n")
 	} else {
 		rf.currentTerm = currentTerm
@@ -195,6 +215,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.log = log
 		rf.lastIncludedIndex = lastIncludedIndex
 		rf.lastIncludedTerm = lastIncludedTerm
+		rf.commitIndex = commitIndex
 	}
 }
 
@@ -244,8 +265,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.lastIncludedTerm = rf.getLogEntry(index).Term
 	rf.log = rf.log[rf.getLogRealIndex(index)+1:]
 
-	rf.persist()
-	rf.persister.SaveStateAndSnapshot(nil, snapshot) // May be time consuming, aquire lock again.
+	// rf.persist()
+	// rf.persister.SaveStateAndSnapshot(nil, snapshot) // May be time consuming, aquire lock again.
+	rf.persister.SaveStateAndSnapshot(rf.getPersistState(), snapshot)
 	rf.mu.Unlock()
 }
 
@@ -384,6 +406,7 @@ type AppendEntriesReply struct {
 	// For fast log backtracking.
 	ConflictIndex int
 	ConflictTerm  int
+	OutDated      bool
 }
 
 func min(x, y int) int {
@@ -415,6 +438,13 @@ func lastLog(logs []logEntry, term int) int {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
+
+	if args.PrevLogIndex < rf.lastIncludedIndex { //难道有问题吗？？？？？
+		Snlog("Outdate AE: args.PrevLogIndex%d n%d's lastIncludedIndex%d\n", args.PrevLogIndex, rf.me, rf.lastIncludedIndex)
+		reply.OutDated = true
+		rf.mu.Unlock()
+		return
+	}
 
 	// Reply false if term < currentTerm (§5.1)
 	if args.Term < rf.currentTerm {
@@ -462,6 +492,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
+			rf.persist()
+
 			DPrintf("AE [%s%d] commitIndex -> %d.\n", role[rf.state], rf.me, rf.commitIndex)
 		}
 	}
@@ -521,6 +553,15 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnap
 		return
 	}
 
+	if args.Term > rf.currentTerm {
+		DPrintf("AE [%s%d] T:%d->%d.\n", role[rf.state], rf.me, rf.currentTerm, args.Term)
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		rf.persist()
+	}
+	rf.state = Follower
+	reply.Term = rf.currentTerm
+
 	// reply.Term = rf.currentTerm
 	// reply.Success = true
 	// rf.rtFlag = true
@@ -532,25 +573,31 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnap
 		rf.log = []logEntry{}
 		rf.lastIncludedIndex = args.LastIncludedIndex
 		rf.lastIncludedTerm = args.LastIncludedTerm
-		rf.persist()
-		rf.persister.SaveStateAndSnapshot(nil, args.Data)
+		// rf.persist()
+		// rf.persister.SaveStateAndSnapshot(nil, args.Data)
+		rf.persister.SaveStateAndSnapshot(rf.getPersistState(), args.Data)
 		reply.Term = rf.currentTerm
 		reply.Success = true
-		rf.rtFlag = true
-		rf.mu.Unlock()
+		// rf.rtFlag = true
+		// rf.mu.Unlock()
 	} else {
 		rf.log = rf.log[rf.getLogRealIndex(args.LastIncludedIndex)+1:]
 		rf.lastIncludedIndex = args.LastIncludedIndex
 		rf.lastIncludedTerm = args.LastIncludedTerm
-		rf.persist()
-		rf.persister.SaveStateAndSnapshot(nil, args.Data)
+		// rf.persist()
+		// rf.persister.SaveStateAndSnapshot(nil, args.Data)
+		rf.persister.SaveStateAndSnapshot(rf.getPersistState(), args.Data)
 		reply.Term = rf.currentTerm
 		reply.Success = true
-		rf.rtFlag = true
-		rf.mu.Unlock()
+		// rf.rtFlag = true
+		// rf.mu.Unlock()
 	}
+
 	Snlog("n%d applied command %d (snapshot)\n", rf.me, args.LastIncludedIndex)
 	rf.applyCh <- ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotIndex: args.LastIncludedIndex + 1, SnapshotTerm: args.LastIncludedTerm}
+
+	rf.rtFlag = true
+	rf.mu.Unlock()
 	if len(rf.rtCh) == 0 {
 		rf.rtCh <- 1
 	}
@@ -669,7 +716,7 @@ func (rf *Raft) election(args *RequestVoteArgs) {
 					voteSum++
 					if (voteSum+1)*2 > len(rf.peers) {
 						rf.state = Leader
-						DPrintf("[C%d] becomes the new leader!\n", rf.me)
+						Snlog("[C%d] becomes the new leader!\n", rf.me)
 
 						for i := range rf.matchIndex {
 							rf.matchIndex[i] = -1
@@ -838,22 +885,23 @@ func (rf *Raft) ticker() {
 
 										// If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,
 										// and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
-										cp := make([]int, len(rf.matchIndex))
-										copy(cp, rf.matchIndex)
-										sort.Ints(cp)
+										// cp := make([]int, len(rf.matchIndex))
+										// copy(cp, rf.matchIndex)
+										// sort.Ints(cp)
 
-										N := cp[(len(cp)-1)/2]
+										// N := cp[(len(cp)-1)/2]
 
-										// Leader can only commit log entries of its own term.
-										if N > rf.commitIndex && (rf.getLogEntry(N)).Term == rf.currentTerm {
-											DPrintf("[L%d] commitIndex -> %d.\n", rf.me, rf.commitIndex)
-											rf.commitIndex = N
-											rf.mu.Unlock()
-										} else {
-											rf.mu.Unlock()
-										}
+										// // Leader can only commit log entries of its own term.
+										// if N > rf.commitIndex && (rf.getLogEntry(N)).Term == rf.currentTerm {
+										// 	DPrintf("[L%d] commitIndex -> %d.\n", rf.me, rf.commitIndex)
+										// 	rf.commitIndex = N
+										// 	rf.persist()
+										// 	rf.mu.Unlock()
+										// } else {
+										// 	rf.mu.Unlock()
+										// }
+										rf.mu.Unlock()
 									} else {
-										DPrintf("This should never happen!\n")
 										rf.mu.Unlock()
 									}
 
@@ -895,12 +943,17 @@ func (rf *Raft) ticker() {
 
 							// }
 
-							DPrintf("[%s%d] sends AppendEntries to [N%d]...\n", role[rf.state], rf.me, idx)
+							Snlog("[%s%d] sends AppendEntries to [N%d]...\n", role[rf.state], rf.me, idx)
 							rf.mu.Unlock()
 
 							go func(int) {
 								ok := rf.sendAppendEntries(idx, args, reply)
 								rf.mu.Lock()
+								//有问题，可能是忽略了不该忽略的，我草泥马我真想不明白啊？config.go:608: one(563249039230145419) failed to reach agreement
+								if ok && reply.OutDated {
+									rf.mu.Unlock()
+									return
+								}
 								if ok && rf.state == Leader && rf.currentTerm == args.Term {
 
 									if reply.Term > rf.currentTerm {
@@ -932,6 +985,7 @@ func (rf *Raft) ticker() {
 										if N > rf.commitIndex && (rf.getLogEntry(N)).Term == rf.currentTerm {
 											DPrintf("[L%d] commitIndex -> %d.\n", rf.me, rf.commitIndex)
 											rf.commitIndex = N
+											rf.persist()
 											rf.mu.Unlock()
 										} else {
 											rf.mu.Unlock()
@@ -967,7 +1021,10 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) applier() {
-	prevCommitIdx := -1
+	// prevCommitIdx := -1
+	rf.mu.Lock()
+	prevCommitIdx := rf.lastIncludedIndex
+	rf.mu.Unlock()
 	for !rf.killed() {
 		rf.mu.Lock()
 		cIdx := rf.commitIndex
@@ -976,7 +1033,7 @@ func (rf *Raft) applier() {
 			for i := prevCommitIdx + 1; i <= cIdx; i++ {
 				// If the log has been truncated, just ignore it.
 				rf.mu.Lock()
-				if i <= rf.lastIncludedIndex {
+				if i <= rf.lastIncludedIndex { // commit的持久化和这里逻辑关系有问题！！！！❌
 					Snlog("n%d ignores command %d\n", rf.me, i)
 					rf.mu.Unlock()
 					continue
@@ -1036,6 +1093,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	for i := range rf.matchIndex {
+		rf.nextIndex[i] = rf.getLastLogIndex() + 1
+	}
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
@@ -1044,10 +1104,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-/*
+/* ⛔️注意事项：
+0. 思考应该持久化哪些状态？
 1. 首先绝对不可能出现leader发送的prevLogIndex比其他成员中的lastIncludedIndex还小的情况，因为成员的快照一定只反映了已提交的状态
-   一致性检查不可能越过这个边界，因此我们可以在getLogEntry中实现一个小trick返回一个假logentry
-2. applier的逻辑需要进行修改，否则在快照过程中会丢失操作
-3. getRealIndex和Start中index关系没考虑清楚？
-4. ！！！注意service和raft层index对应关系，他们之间差了1！！！因此getLastIndex()不能随便返回-1
+   一致性检查不可能越过这个边界，因此我们可以在getLogEntry中实现一个小trick返回一个假logEntry。此外这个判断逻辑也同样适用于后面
+   AppendEntries的相关过期判断
+2. lab2D中applier不能recover后不能提交崩溃前提交过的日志项，具体见config中的applierSnap()
+3. 注意service和raft层index对应关系，二者之间相差1，因此getLastIndex()不能随便返回-1，后面应该优化逻辑避免显示转换
+4. 注意保证持久化原子性，禁止persist()SaveStateAndSnapshot()组合使用，过程中如果发生crash会产生严重不一致，应该仅使用SaveStateAndSnapshot()
 */
