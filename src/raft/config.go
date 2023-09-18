@@ -199,8 +199,7 @@ func (cfg *config) ingestSnap(i int, snapshot []byte, index int) string {
 		return "snapshot Decode() error"
 	}
 	if index != -1 && index != lastIncludedIndex {
-		// err := fmt.Sprintf("server %v snapshot doesn't match m.SnapshotIndex", i)
-		err := fmt.Sprintf("server %v snapshot doesn't match m.SnapshotIndex %d %d", i, index, lastIncludedIndex)
+		err := fmt.Sprintf("server %v snapshot doesn't match m.SnapshotIndex", i)
 		return err
 	}
 	cfg.logs[i] = map[int]interface{}{}

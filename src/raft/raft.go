@@ -18,8 +18,6 @@ package raft
 //
 
 import (
-	//	"bytes"
-
 	"bytes"
 	"math/rand"
 	"sort"
@@ -77,7 +75,6 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
-	// Your data here (2A, 2B, 2C).
 	state   State
 	rtCh    chan int // Reset timer channel
 	applyCh chan ApplyMsg
@@ -102,7 +99,7 @@ type Raft struct {
 	lastIncludedTerm  int
 }
 
-// Too slow...but feasible when SnapShotInterval is small.
+// too slow...but feasible when SnapShotInterval is small.
 func (rf *Raft) getLogEntry(index int) *logEntry {
 	for i := range rf.log {
 		if rf.log[i].Index == index {
@@ -110,21 +107,13 @@ func (rf *Raft) getLogEntry(index int) *logEntry {
 		}
 	}
 
-	// Little trick, pretending to have a dummy log entry.
+	// little trick, pretending to have a dummy log entry.
 	if index == rf.lastIncludedIndex {
 		return &logEntry{Term: rf.lastIncludedTerm, Index: rf.lastIncludedIndex}
 	}
 	return nil
 }
 
-func (rf *Raft) getLastLogIndex() int {
-	if len(rf.log) == 0 {
-		return rf.lastIncludedIndex
-	}
-	return rf.log[len(rf.log)-1].Index
-}
-
-// Too slow...
 func (rf *Raft) getLogRealIndex(index int) int {
 	for i := range rf.log {
 		if rf.log[i].Index == index {
@@ -134,34 +123,25 @@ func (rf *Raft) getLogRealIndex(index int) int {
 	return -1
 }
 
+func (rf *Raft) getLastLogIndex() int {
+	if len(rf.log) == 0 {
+		return rf.lastIncludedIndex
+	}
+	return rf.log[len(rf.log)-1].Index
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
-	// Your code here (2A).
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	term = rf.currentTerm
 	isleader = (rf.state == Leader)
 
 	return term, isleader
-}
-
-// save Raft's persistent state to stable storage,
-// where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
-func (rf *Raft) persist() {
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
-	e.Encode(rf.lastIncludedIndex)
-	e.Encode(rf.lastIncludedTerm)
-	e.Encode(rf.commitIndex) // actually don't need to...
-	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
 }
 
 func (rf *Raft) getPersistState() []byte {
@@ -197,7 +177,7 @@ func (rf *Raft) readPersist(data []byte) {
 		d.Decode(&lastIncludedIndex) != nil ||
 		d.Decode(&lastIncludedTerm) != nil ||
 		d.Decode(&commitIndex) != nil {
-		DPrintf("read persist error\n")
+		DPrintln("read persist error")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
@@ -219,12 +199,11 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
 	index = index - 1
 	rf.mu.Lock()
-	// Can I assume Snapshot() is always called in valid?
+
 	if index <= rf.lastIncludedIndex || index > rf.getLastLogIndex() {
-		Snlog("Snapshot() index check failed\n")
+		DPrintln("Snapshot() index check failed")
 		rf.mu.Unlock()
 		return
 	}
@@ -232,17 +211,12 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.lastIncludedIndex = index
 	rf.lastIncludedTerm = rf.getLogEntry(index).Term
 	rf.log = rf.log[rf.getLogRealIndex(index)+1:]
-
-	// rf.persist()
-	// rf.persister.SaveStateAndSnapshot(nil, snapshot) // May be time consuming, aquire lock again.
 	rf.persister.SaveStateAndSnapshot(rf.getPersistState(), snapshot)
 	rf.mu.Unlock()
 }
 
-// example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
 	Term        int
 	CandidateId int
 
@@ -253,35 +227,31 @@ type RequestVoteArgs struct {
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
-	// Your data here (2A).
 	Term        int
 	VoteGranted bool
 }
 
-// example RequestVote RPC handler.
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { // TODO🔧: refactor the code...
-	// Your code here (2A, 2B).
+func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 
 	// 1. Reply false if term < currentTerm (§5.1)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
-		DPrintf("RV [%s%d] refuses to vote for [C%d]. (T1:%d \\ T2:%d)\n", role[rf.state], rf.me, args.CandidateId, rf.currentTerm, args.Term)
+		DPrintln("RV [%s%d] refuses to vote for [C%d]. (T1:%d \\ T2:%d)", role[rf.state], rf.me, args.CandidateId, rf.currentTerm, args.Term)
 		rf.mu.Unlock()
 		return
 	}
 
 	stepAside := false
 	if args.Term > rf.currentTerm {
-		DPrintf("RV [%s%d] T:%d->%d.\n", role[rf.state], rf.me, rf.currentTerm, args.Term)
+		DPrintln("RV [%s%d] T:%d->%d.", role[rf.state], rf.me, rf.currentTerm, args.Term)
 		rf.currentTerm = args.Term
-		rf.persist()
 		rf.votedFor = -1
-		rf.persist()
+		rf.persister.SaveRaftState(rf.getPersistState())
 		if rf.state == Leader || rf.state == Candidate {
 			stepAside = true
-			DPrintf("RV [%s%d] becomes follower before voting(or not) for [C%d]. (T1:%d \\ T2:%d)\n", role[rf.state], rf.me, args.CandidateId, rf.currentTerm, args.Term)
+			DPrintln("RV [%s%d] becomes follower before voting(or not) for [C%d]. (T1:%d \\ T2:%d)", role[rf.state], rf.me, args.CandidateId, rf.currentTerm, args.Term)
 		}
 		rf.state = Follower
 	}
@@ -298,8 +268,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && isUpToDate {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
-		rf.persist()
-		DPrintf("RV [%s%d] votes for [C%d]. (T1:%d T2:%d)\n", role[rf.state], rf.me, args.CandidateId, rf.currentTerm, args.Term)
+		rf.persister.SaveRaftState(rf.getPersistState())
+		DPrintln("RV [%s%d] votes for [C%d]. (T1:%d T2:%d)", role[rf.state], rf.me, args.CandidateId, rf.currentTerm, args.Term)
 
 		rf.rtFlag = true
 		rf.mu.Unlock()
@@ -308,7 +278,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 		}
 	} else {
 		reply.VoteGranted = false
-		DPrintf("RV [%s%d] refuses to vote for [C%d]. (T1:%d VF:%d UTD:%v \\ T2:%d)\n", role[rf.state], rf.me, args.CandidateId, rf.currentTerm, rf.votedFor, isUpToDate, args.Term)
+		DPrintln("RV [%s%d] refuses to vote for [C%d]. (T1:%d VF:%d \\ T2:%d)", role[rf.state], rf.me, args.CandidateId, rf.currentTerm, rf.votedFor, args.Term)
 
 		if stepAside {
 			rf.rtFlag = true
@@ -384,7 +354,7 @@ func min(x, y int) int {
 	return y
 }
 
-// Return the index of first log whose entry has corresponding term.
+// Return the logical index of first log whose entry has corresponding term.
 func firstLog(logs []logEntry, term int) int {
 	for i := range logs {
 		if logs[i].Term == term {
@@ -394,7 +364,7 @@ func firstLog(logs []logEntry, term int) int {
 	return -1
 }
 
-// Return the index of last log whose entry has corresponding term.
+// Return the logical index of last log whose entry has corresponding term.
 func lastLog(logs []logEntry, term int) int {
 	for i := len(logs) - 1; i >= 0; i-- {
 		if logs[i].Term == term {
@@ -407,8 +377,9 @@ func lastLog(logs []logEntry, term int) int {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 
-	if args.PrevLogIndex < rf.lastIncludedIndex { // 是否有可能无法感知退位而引起脑裂？我认为有些危险。后面如果发生提交项冲突（极有可能为脑裂）并且刚好打印了下面的日志，则需修改逻辑
-		Snlog("Outdate AE: args.PrevLogIndex%d n%d's lastIncludedIndex%d\n", args.PrevLogIndex, rf.me, rf.lastIncludedIndex)
+	// ATTENTION: consider leader cannnot step aside, brain split -> commit inconsistency?
+	if args.PrevLogIndex < rf.lastIncludedIndex {
+		DPrintln("AE(Outdated) [L%d].PrevLogIndex:%d [%s%d].lastIncludedIndex:%d", args.LeaderId, args.PrevLogIndex, role[rf.state], rf.me, rf.lastIncludedIndex)
 		reply.OutDated = true
 		rf.mu.Unlock()
 		return
@@ -418,26 +389,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		DPrintf("AE [%s%d] replies false to [L%d]. (T1:%d \\ T2:%d)\n", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
+		DPrintln("AE [%s%d] replies false to [L%d]. (T1:%d \\ T2:%d)", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
 		rf.mu.Unlock()
 		return
 	}
 
 	if args.Term > rf.currentTerm {
-		DPrintf("AE [%s%d] T:%d->%d.\n", role[rf.state], rf.me, rf.currentTerm, args.Term)
+		DPrintln("AE [%s%d] T:%d->%d.", role[rf.state], rf.me, rf.currentTerm, args.Term)
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
-		rf.persist()
+		rf.persister.SaveRaftState(rf.getPersistState())
 	}
 	rf.state = Follower
 	reply.Term = rf.currentTerm
 
 	// Reply false if log doesn’t contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (§5.3)
+	// (We make sure that args.PrevLogIndex is in valid range of rf's log by checking in ticker())
 	if args.PrevLogIndex != -1 && (args.PrevLogIndex > rf.getLastLogIndex() ||
-		(rf.getLogEntry(args.PrevLogIndex) != nil && rf.getLogEntry(args.PrevLogIndex).Term != args.PrevLogTerm)) { // 危险：rf.getLogEntry(args.PrevLogIndex)可能为nil（考虑快照）
+		(rf.getLogEntry(args.PrevLogIndex) != nil && rf.getLogEntry(args.PrevLogIndex).Term != args.PrevLogTerm)) {
 		reply.Success = false
-		Snlog("AE [%s%d] replies false to [L%d] (Consistency check failure). (T1:%d \\ T2:%d)\n", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
+		DPrintln("AE [%s%d] replies false to [L%d] (Consistency check failure). (T1:%d \\ T2:%d)", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
 
 		if args.PrevLogIndex > rf.getLastLogIndex() {
 			reply.ConflictIndex = rf.getLastLogIndex() + 1
@@ -448,21 +420,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	} else {
 		reply.Success = true
-		DPrintf("AE [%s%d] replies true to [L%d]. (T1:%d \\ T2:%d)\n", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
+		DPrintln("AE [%s%d] replies true to [L%d]. (T1:%d \\ T2:%d)", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
 
-		// What if args.PrevLogIndex == rf.lastIncludedIndex?
-		// Seems to be ok, getLogRealIndex will return -1, so rf.log will be an empty slice.
+		// what if args.PrevLogIndex == rf.lastIncludedIndex?
+		// seems to be ok, getLogRealIndex will return -1, so rf.log will be an empty slice.
 		rf.log = rf.log[:rf.getLogRealIndex(args.PrevLogIndex)+1]
-		// rf.log = rf.log[:args.PrevLogIndex-rf.lastIncludedIndex]
 		rf.log = append(rf.log, args.Entries...)
-		rf.persist()
+		rf.persister.SaveRaftState(rf.getPersistState())
 
 		// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
-			rf.persist()
-
-			DPrintf("AE [%s%d] commitIndex -> %d.\n", role[rf.state], rf.me, rf.commitIndex)
+			rf.persister.SaveRaftState(rf.getPersistState())
+			DPrintln("AE [%s%d] commitIndex->%d.", role[rf.state], rf.me, rf.commitIndex)
 		}
 	}
 
@@ -508,28 +478,26 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnap
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		DPrintf("AE [%s%d] replies false to [L%d]. (T1:%d \\ T2:%d)\n", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
+		DPrintln("IS [%s%d] replies false to [L%d]. (T1:%d \\ T2:%d)", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
 		rf.mu.Unlock()
 		return
 	}
-	/*-----------------------------------------------------------------*/
-	//一定要注意这两段的先后顺序，若相反则导致本应退位的leader退位失败发生脑裂
+
 	if args.Term > rf.currentTerm {
-		DPrintf("AE [%s%d] T:%d->%d.\n", role[rf.state], rf.me, rf.currentTerm, args.Term)
+		DPrintln("IS [%s%d] T:%d->%d.", role[rf.state], rf.me, rf.currentTerm, args.Term)
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.state = Follower
-		rf.persist()
+		rf.persister.SaveRaftState(rf.getPersistState())
 	}
 
 	if args.LastIncludedTerm < rf.lastIncludedTerm || args.LastIncludedIndex <= rf.lastIncludedIndex {
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		DPrintf("AE [%s%d] replies false to [L%d]. (T1:%d \\ T2:%d)\n", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
+		DPrintln("IS [%s%d] replies false to [L%d]. (T1:%d \\ T2:%d)", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
 		rf.mu.Unlock()
 		return
 	}
-	/*-----------------------------------------------------------------*/
 
 	reply.Term = rf.currentTerm
 	reply.Success = true
@@ -544,7 +512,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnap
 	}
 	rf.persister.SaveStateAndSnapshot(rf.getPersistState(), args.Data)
 
-	Snlog("n%d applied command %d (snapshot)\n", rf.me, args.LastIncludedIndex)
+	DPrintln("IS [%s%d] applied command %d", role[rf.state], rf.me, args.LastIncludedIndex)
 	rf.applyCh <- ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotIndex: args.LastIncludedIndex + 1, SnapshotTerm: args.LastIncludedTerm}
 
 	rf.rtFlag = true
@@ -592,8 +560,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	log := logEntry{command, rf.currentTerm, index}
 	rf.log = append(rf.log, log)
-	rf.persist()
-	DPrintf("[%s%d] appends new log at %d.\n", role[rf.state], rf.me, index)
+	rf.persister.SaveRaftState(rf.getPersistState())
+	DPrintln("[%s%d] appends new log at %d.", role[rf.state], rf.me, index)
 
 	rf.matchIndex[rf.me] = rf.getLastLogIndex()
 
@@ -626,7 +594,7 @@ func (rf *Raft) election(args *RequestVoteArgs) {
 	rf.mu.Lock()
 	voteSum := 0
 	isFinished := false
-	DPrintf("[%s%d] starts election...\n", role[rf.state], rf.me)
+	DPrintln("[%s%d] starts election...", role[rf.state], rf.me)
 	rf.mu.Unlock()
 
 	for i := range rf.peers {
@@ -640,16 +608,16 @@ func (rf *Raft) election(args *RequestVoteArgs) {
 		// Send RequestVote RPCs concurrently.
 		go func(int) {
 			rf.mu.Lock()
-			DPrintf("[%s%d] sends RequestVote to [N%d]...", role[rf.state], rf.me, idx)
+			DPrintln("[%s%d] sends RequestVote to [N%d]...", role[rf.state], rf.me, idx)
 			rf.mu.Unlock()
 
 			ok := rf.sendRequestVote(idx, args, reply)
 			rf.mu.Lock()
 			if ok && rf.state == Candidate && rf.currentTerm == args.Term {
 				if reply.Term > rf.currentTerm {
-					DPrintf("[C%d]'s election failed, becomming follower. (T1:%d \\ RNO: %d T2:%d)\n", rf.me, rf.currentTerm, idx, reply.Term)
+					DPrintln("[C%d]'s election failed, becomming follower. (T1:%d \\ RNO: %d T2:%d)", rf.me, rf.currentTerm, idx, reply.Term)
 					rf.currentTerm = reply.Term
-					rf.persist()
+					rf.persister.SaveRaftState(rf.getPersistState())
 					rf.state = Follower
 
 					if !isFinished {
@@ -666,7 +634,7 @@ func (rf *Raft) election(args *RequestVoteArgs) {
 					voteSum++
 					if (voteSum+1)*2 > len(rf.peers) {
 						rf.state = Leader
-						Snlog("[C%d] becomes the new leader!\n", rf.me)
+						DPrintln("[C%d] becomes the new leader!", rf.me)
 
 						for i := range rf.matchIndex {
 							rf.matchIndex[i] = -1
@@ -703,13 +671,12 @@ func (rf *Raft) ticker() {
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 
-		interval := 500 + rand.Intn(250) // Need to be big enough to pass 2c's unreliable test.
+		interval := 500 + rand.Intn(250) // need to be big enough to pass 2c's unreliable test.
 
-		rf.mu.Lock() // May stuck here if send data to rf.rtCh or ch(election) while holding the lock.
-		// DPrintf("[%s%d] reset timer with interval %dms.\n", role[rf.state], rf.me, interval)
+		rf.mu.Lock() // may stuck here if send data to rf.rtCh or ch(election) while holding the lock.
 
 		if rf.rtFlag {
-			DPrintf("Warning: atomic 0!\n")
+			DPrintln("warning: redundant reset")
 			<-rf.rtCh
 			rf.rtFlag = false
 		}
@@ -722,17 +689,17 @@ func (rf *Raft) ticker() {
 				rf.rtFlag = false
 				rf.mu.Unlock()
 			case <-time.After(time.Duration(interval) * time.Millisecond):
-				// Timeout, start election...
+				// timeout, start election...
 				rf.mu.Lock()
 				if rf.rtFlag {
-					DPrintf("Warning: atomic 1!\n")
+					DPrintln("warning: redundant reset")
 					<-rf.rtCh
 					rf.rtFlag = false
 				} else {
 					rf.currentTerm++
 					rf.state = Candidate
 					rf.votedFor = rf.me
-					rf.persist()
+					rf.persister.SaveRaftState(rf.getPersistState())
 				}
 				rf.mu.Unlock()
 			}
@@ -755,7 +722,7 @@ func (rf *Raft) ticker() {
 			case <-time.After(time.Duration(interval) * time.Millisecond):
 				rf.mu.Lock()
 				if rf.rtFlag {
-					DPrintf("Warning: atomic 2!\n")
+					DPrintln("warning: redundant reset")
 					<-rf.rtCh
 					rf.rtFlag = false
 				} else if rf.state == Candidate {
@@ -776,7 +743,7 @@ func (rf *Raft) ticker() {
 					continue
 				}
 
-				// Set up goroutines for each follower to deal with heartbeat or log replication.
+				// set up goroutines for each follower to deal with AppendEntries or InstallSnapshot
 				idx := i
 				go func(int) {
 					for {
@@ -796,13 +763,13 @@ func (rf *Raft) ticker() {
 							break
 						}
 
-						// Sending heartbeat periodically.
+						// send heartbeat periodically.
 						if rf.state != Leader {
 							rf.mu.Unlock()
 							break
 						}
 
-						// Corresponding log has been truncated, should send InstallSnapshotRPC instead of AppendEntriesRPC
+						// corresponding log has been truncated, should send InstallSnapshotRPC instead of AppendEntriesRPC
 						if rf.nextIndex[idx] <= rf.lastIncludedIndex {
 							snargs := &InstallSnapshotRequest{}
 							snreply := &InstallSnapshotReply{}
@@ -817,9 +784,9 @@ func (rf *Raft) ticker() {
 								rf.mu.Lock()
 								if ok && rf.state == Leader && rf.currentTerm == snargs.Term {
 									if snreply.Term > rf.currentTerm {
-										DPrintf("[L%d] steps aside. (T1:%d \\ RNO: %d T2:%d)\n", rf.me, rf.currentTerm, idx, snreply.Term)
+										DPrintln("[L%d] steps aside. (T1:%d \\ RNO: %d T2:%d)", rf.me, rf.currentTerm, idx, snreply.Term)
 										rf.currentTerm = snreply.Term
-										rf.persist()
+										rf.persister.SaveRaftState(rf.getPersistState())
 										rf.state = Follower
 										rf.rtFlag = true
 										rf.mu.Unlock()
@@ -832,31 +799,12 @@ func (rf *Raft) ticker() {
 									if snreply.Success {
 										rf.matchIndex[idx] = snargs.LastIncludedIndex
 										rf.nextIndex[idx] = snargs.LastIncludedIndex + 1
-
-										// If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,
-										// and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
-										// cp := make([]int, len(rf.matchIndex))
-										// copy(cp, rf.matchIndex)
-										// sort.Ints(cp)
-
-										// N := cp[(len(cp)-1)/2]
-
-										// // Leader can only commit log entries of its own term.
-										// if N > rf.commitIndex && (rf.getLogEntry(N)).Term == rf.currentTerm {
-										// 	DPrintf("[L%d] commitIndex -> %d.\n", rf.me, rf.commitIndex)
-										// 	rf.commitIndex = N
-										// 	rf.persist()
-										// 	rf.mu.Unlock()
-										// } else {
-										// 	rf.mu.Unlock()
-										// }
+										// there is no need to update matchIndex and nextIndex here
 										rf.mu.Unlock()
 									} else {
-										// TODO: 我认为应该更新matchIndex和nextIndex，但return false只有两种可能， 排除任期拒绝外另一种
-										// 可能的话或许可以列为过期问题进行处理（这样的话反而不应该更新，过期值会覆盖新值）。
+										// should we update matchIndex and nextIndex here or just consider it outdated?
 										rf.mu.Unlock()
 									}
-
 								} else {
 									rf.mu.Unlock()
 								}
@@ -875,33 +823,23 @@ func (rf *Raft) ticker() {
 							if args.PrevLogIndex == -1 {
 								args.PrevLogTerm = -1
 							} else {
-								args.PrevLogTerm = rf.getLogEntry(args.PrevLogIndex).Term //panic: runtime error: invalid memory address or nil pointer dereference
+								args.PrevLogTerm = rf.getLogEntry(args.PrevLogIndex).Term
 							}
 							args.LeaderCommit = rf.commitIndex
 
 							originalLogs := make([]logEntry, len(rf.log))
 							copy(originalLogs, rf.log)
-
-							// if rf.nextIndex[idx] != rf.getLastLogIndex()+1 {
-							// args.Entries = rf.log[rf.nextIndex[idx]:len(rf.log)] // ❌ There may be a subtle error in the assignment here, which may cause a race condition later.
-							// args.Entries = make([]logEntry, len(rf.log[rf.nextIndex[idx]:len(rf.log)]))
 							if rf.getLogRealIndex(rf.nextIndex[idx]) != -1 {
-								args.Entries = make([]logEntry, len(rf.log[rf.getLogRealIndex(rf.nextIndex[idx]):])) //2D: panic: runtime error: slice bounds out of range [-1:]!!
-								// 比如考虑4个nodes，leader成功复制三个entry到了2个nodes并提交然后生成了快照，这时剩下的node的对应nextIndex没有跟上因此调用rf.getLogRealIndex(rf.nextIndex[idx])会反回-1报错
-								// 因此leader需要根据条件发送快照
-
+								args.Entries = make([]logEntry, len(rf.log[rf.getLogRealIndex(rf.nextIndex[idx]):]))
 								copy(args.Entries, rf.log[rf.getLogRealIndex(rf.nextIndex[idx]):])
 							}
 
-							// }
-
-							Snlog("[%s%d] sends AppendEntries to [N%d]...\n", role[rf.state], rf.me, idx)
+							DPrintln("[%s%d] sends AppendEntries to [N%d]...", role[rf.state], rf.me, idx)
 							rf.mu.Unlock()
 
 							go func(int) {
 								ok := rf.sendAppendEntries(idx, args, reply)
 								rf.mu.Lock()
-								//有问题，可能是忽略了不该忽略的，我草泥马我真想不明白啊？config.go:608: one(563249039230145419) failed to reach agreement
 								if ok && reply.OutDated {
 									rf.mu.Unlock()
 									return
@@ -909,9 +847,9 @@ func (rf *Raft) ticker() {
 								if ok && rf.state == Leader && rf.currentTerm == args.Term {
 
 									if reply.Term > rf.currentTerm {
-										DPrintf("[L%d] steps aside. (T1:%d \\ RNO: %d T2:%d)\n", rf.me, rf.currentTerm, idx, reply.Term)
+										DPrintln("[L%d] steps aside. (T1:%d \\ RNO: %d T2:%d)", rf.me, rf.currentTerm, idx, reply.Term)
 										rf.currentTerm = reply.Term
-										rf.persist()
+										rf.persister.SaveRaftState(rf.getPersistState())
 										rf.state = Follower
 										rf.rtFlag = true
 										rf.mu.Unlock()
@@ -935,16 +873,14 @@ func (rf *Raft) ticker() {
 
 										// Leader can only commit log entries of its own term.
 										if N > rf.commitIndex && (rf.getLogEntry(N)).Term == rf.currentTerm {
-											DPrintf("[L%d] commitIndex -> %d.\n", rf.me, rf.commitIndex)
+											DPrintln("[L%d] commitIndex->%d.", rf.me, rf.commitIndex)
 											rf.commitIndex = N
-											rf.persist()
+											rf.persister.SaveRaftState(rf.getPersistState())
 											rf.mu.Unlock()
 										} else {
 											rf.mu.Unlock()
 										}
 									} else {
-										// rf.nextIndex[idx]-- // ❌❌❌
-										// rf.nextIndex[idx] = args.PrevLogIndex
 										if reply.ConflictTerm != -1 && lastLog(originalLogs, reply.ConflictTerm) != -1 {
 											rf.nextIndex[idx] = lastLog(originalLogs, reply.ConflictTerm) + 1
 										} else {
@@ -957,7 +893,7 @@ func (rf *Raft) ticker() {
 								}
 							}(idx)
 
-							time.Sleep(105 * time.Millisecond) // Need to be small enough to pass 2c's unreliable test.
+							time.Sleep(105 * time.Millisecond) // need to be small enough to pass 2c's unreliable test.
 						}
 					}
 				}(idx)
@@ -973,8 +909,8 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) applier() {
-	// prevCommitIdx := -1
 	rf.mu.Lock()
+	// prevCommitIdx := -1
 	prevCommitIdx := rf.lastIncludedIndex
 	rf.mu.Unlock()
 	for !rf.killed() {
@@ -985,19 +921,18 @@ func (rf *Raft) applier() {
 			for i := prevCommitIdx + 1; i <= cIdx; i++ {
 				// If the log has been truncated, just ignore it.
 				rf.mu.Lock()
-				if i <= rf.lastIncludedIndex { // commit的持久化和这里逻辑关系有问题！！！！❌
-					Snlog("n%d ignores command %d\n", rf.me, i)
+				if i <= rf.lastIncludedIndex {
+					DPrintln("[%s%d] ignores command %d", role[rf.state], rf.me, i)
 					rf.mu.Unlock()
 					continue
 				}
 				logCommited := rf.getLogEntry(i)
-				command := logCommited.Command // panic: runtime error: invalid memory address or nil pointer dereference
+				command := logCommited.Command
 				rf.mu.Unlock()
 				index := i
 				rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: index + 1}
-				Snlog("n%d applied command %d\n", rf.me, i)
 				rf.mu.Lock()
-				DPrintf("[%s%d] commits log[%d]\n", role[rf.state], rf.me, i)
+				DPrintln("[%s%d] applied command %d", role[rf.state], rf.me, i)
 				rf.mu.Unlock()
 			}
 			prevCommitIdx = cIdx
@@ -1027,7 +962,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.rtCh = make(chan int) // Remember initialization of channel.
 	rf.applyCh = applyCh
 
-	// Your initialization code here (2A, 2B, 2C).
 	rf.currentTerm = 0
 	rf.votedFor = -1
 
@@ -1056,13 +990,5 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-/* ⛔️注意事项：
-0. 思考应该持久化哪些状态？
-1. 首先绝对不可能出现leader发送的prevLogIndex比其他成员中的lastIncludedIndex还小的情况，因为成员的快照一定只反映了已提交的状态
-   一致性检查不可能越过这个边界，因此我们可以在getLogEntry中实现一个小trick返回一个假logEntry。此外这个判断逻辑也同样适用于后面
-   AppendEntries的相关过期判断
-2. lab2D中applier不能recover后不能提交崩溃前提交过的日志项，具体见config中的applierSnap()
-3. 注意service和raft层index对应关系，二者之间相差1，因此getLastIndex()不能随便返回-1，后面应该优化逻辑避免显示转换
-4. 注意保证持久化原子性，禁止persist()SaveStateAndSnapshot()组合使用，过程中如果发生crash会产生严重不一致，应该仅使用SaveStateAndSnapshot()
-5. 感知身份的变化（尤其退位）是最重要的，否则可能会发生脑裂
-*/
+// TOTHINK：
+// 1. When sending to rf.rtCh, should be better to check rf.Flag == false to avoid duplicate sending. (this should be much more safe than current implementation)

@@ -3,19 +3,11 @@ package raft
 import "log"
 
 // Debugging
-const Debug = false
-const SDebug = true
+const Debug = true
 
-func DPrintf(format string, a ...interface{}) (n int, err error) {
+func DPrintln(format string, a ...interface{}) (n int, err error) {
 	if Debug {
-		log.Printf(format, a...)
-	}
-	return
-}
-
-func Snlog(format string, a ...interface{}) (n int, err error) {
-	if SDebug {
-		log.Printf(format, a...)
+		log.Printf(format+"\n", a...)
 	}
 	return
 }
