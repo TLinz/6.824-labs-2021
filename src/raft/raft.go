@@ -546,7 +546,6 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotRequest, re
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	// Your code here (2B).
 	rf.mu.Lock()
 
 	if rf.state != Leader {
@@ -557,7 +556,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := rf.getLastLogIndex() + 1
 	term := rf.currentTerm
 
-	// Your code here (2B).
 	log := logEntry{command, rf.currentTerm, index}
 	rf.log = append(rf.log, log)
 	rf.persister.SaveRaftState(rf.getPersistState())
@@ -751,7 +749,7 @@ func (rf *Raft) ticker() {
 
 						if rf.killed() {
 							if rf.state == Leader {
-								rf.state = Follower // TOFIX: should not become follower when being killed...
+								rf.state = Follower // no need to become follower, since state is volatile
 								rf.rtFlag = true
 								rf.mu.Unlock()
 								if len(rf.rtCh) == 0 {
@@ -991,4 +989,4 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 // TOTHINK：
-// 1. When sending to rf.rtCh, should be better to check rf.Flag == false to avoid duplicate sending. (this should be much more safe than current implementation)
+// 1. When sending to rf.rtCh, should be better to check rf.Flag == false to avoid duplicate sending. (this should be much more safer than current implementation)
