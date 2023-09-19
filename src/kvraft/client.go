@@ -14,6 +14,7 @@ var counter int
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	mu           sync.Mutex
 	clerkId      int // unique identifier
 	commandId    int // monotonically increasing command counteras
 	lastLeaderId int
@@ -51,6 +52,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
 	ck.commandId += 1
+	DPrintln("[C%d:%d] Get key:%s", ck.clerkId, ck.commandId, key)
 	for {
 		for _, srv := range ck.servers {
 			args := &GetArgs{ck.clerkId, ck.commandId, key}
@@ -58,6 +60,7 @@ func (ck *Clerk) Get(key string) string {
 			ok := srv.Call("KVServer.Get", args, reply)
 			if ok {
 				if reply.Err == OK {
+					DPrintln("success [C%d:%d] Get key:%s value:%s", ck.clerkId, ck.commandId, key, reply.Value)
 					// ck.lastLeaderId = i
 					return reply.Value
 				} else if reply.Err == ErrNoKey {
@@ -81,6 +84,7 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.commandId += 1
+	DPrintln("[C%d:%d] %s key:%s value:%s", ck.clerkId, ck.commandId, op, key, value)
 	for {
 		for _, srv := range ck.servers {
 			args := &PutAppendArgs{key, value, op, ck.clerkId, ck.commandId}
@@ -88,6 +92,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			ok := srv.Call("KVServer.PutAppend", args, reply)
 			if ok {
 				if reply.Err == OK {
+					DPrintln("success [C%d:%d] %s key:%s value:%s", ck.clerkId, ck.commandId, op, key, value)
 					// ck.lastLeaderId = i
 					return
 				}

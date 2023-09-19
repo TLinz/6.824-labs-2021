@@ -23,6 +23,11 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ClientId  int
+	CommandId int
+	Type      string // "Put" or "Append" or "Get"
+	Key       string
+	Value     string
 }
 
 type KVServer struct {
@@ -39,15 +44,7 @@ type KVServer struct {
 	kv   map[string]string // database
 }
 
-type Command struct {
-	ClientId  int
-	CommandId int
-	Type      string // "Put" or "Append" or "Get"
-	Key       string
-	Value     string
-}
-
-func (kv *KVServer) applyCmd(cmd Command) {
+func (kv *KVServer) applyCmd(cmd Op) {
 	switch cmd.Type {
 	case "Get":
 	case "Put":
@@ -59,7 +56,7 @@ func (kv *KVServer) applyCmd(cmd Command) {
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	command := Command{args.ClientId, args.CommandId, "Get", args.Key, ""}
+	command := Op{args.ClientId, args.CommandId, "Get", args.Key, ""}
 	idx, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -72,17 +69,24 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		}
 		select {
 		case msg := <-kv.applyCh:
-			cmd := msg.Command.(Command)
+			cmd := msg.Command.(Op)
 			// check if the cmd is dulplicated
 			kv.mu.Lock()
 			if cmd.CommandId <= kv.cmap[cmd.ClientId] {
+				if msg.CommandIndex == idx {
+					reply.Err = OK
+					reply.Value = kv.kv[cmd.Key]
+					kv.mu.Unlock()
+					return
+				}
+				kv.mu.Unlock()
 				continue
 			}
 			// apply the command to state machine and update cmap
 			kv.applyCmd(cmd)
 			kv.cmap[cmd.ClientId] = cmd.CommandId
 
-			if msg.CommandIndex == idx { //wrong !!!
+			if msg.CommandIndex == idx {
 				if cmd == command {
 					v, ok := kv.kv[cmd.Key]
 					if ok {
@@ -98,16 +102,18 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 					}
 				} else {
 					reply.Err = ErrWrongLeader
+					kv.mu.Unlock()
 					return
 				}
 			}
+			kv.mu.Unlock()
 		}
 	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	command := Command{args.ClientId, args.CommandId, args.Op, args.Key, ""}
+	command := Op{args.ClientId, args.CommandId, args.Op, args.Key, args.Value}
 	idx, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -120,25 +126,34 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		}
 		select {
 		case msg := <-kv.applyCh:
-			cmd := msg.Command.(Command)
+			cmd := msg.Command.(Op)
 			// check if the cmd is dulplicated
 			kv.mu.Lock()
 			if cmd.CommandId <= kv.cmap[cmd.ClientId] {
+				if msg.CommandIndex == idx {
+					reply.Err = OK
+					kv.mu.Unlock()
+					return
+				}
+				kv.mu.Unlock()
 				continue
 			}
 			// apply the command to state machine and update cmap
 			kv.applyCmd(cmd)
 			kv.cmap[cmd.ClientId] = cmd.CommandId
 
-			if msg.CommandIndex == idx { // wrong !!!
+			if msg.CommandIndex == idx {
 				if cmd == command {
 					reply.Err = OK
+					kv.mu.Unlock()
 					return
 				} else {
 					reply.Err = ErrWrongLeader
+					kv.mu.Unlock()
 					return
 				}
 			}
+			kv.mu.Unlock()
 		}
 	}
 }
