@@ -1,13 +1,22 @@
 package kvraft
 
-import "6.824/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
+	"sync"
 
+	"6.824/labrpc"
+)
+
+var cmu sync.Mutex
+var counter int
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	clerkId      int // unique identifier
+	commandId    int // monotonically increasing command counteras
+	lastLeaderId int
 }
 
 func nrand() int64 {
@@ -20,11 +29,16 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
+	ck.commandId = 0
+
+	cmu.Lock()
+	ck.clerkId = counter
+	counter += 1
+	cmu.Unlock()
+
 	return ck
 }
 
-//
 // fetch the current value for a key.
 // returns "" if the key does not exist.
 // keeps trying forever in the face of all other errors.
@@ -35,14 +49,28 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // the types of args and reply (including whether they are pointers)
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
-//
 func (ck *Clerk) Get(key string) string {
-
-	// You will have to modify this function.
-	return ""
+	ck.commandId += 1
+	for {
+		for _, srv := range ck.servers {
+			args := &GetArgs{ck.clerkId, ck.commandId, key}
+			reply := &GetReply{}
+			ok := srv.Call("KVServer.Get", args, reply)
+			if ok {
+				if reply.Err == OK {
+					// ck.lastLeaderId = i
+					return reply.Value
+				} else if reply.Err == ErrNoKey {
+					// ck.lastLeaderId = i
+					return ""
+				}
+			} else {
+				continue
+			}
+		}
+	}
 }
 
-//
 // shared by Put and Append.
 //
 // you can send an RPC with code like this:
@@ -51,9 +79,23 @@ func (ck *Clerk) Get(key string) string {
 // the types of args and reply (including whether they are pointers)
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
-//
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	ck.commandId += 1
+	for {
+		for _, srv := range ck.servers {
+			args := &PutAppendArgs{key, value, op, ck.clerkId, ck.commandId}
+			reply := &PutAppendReply{}
+			ok := srv.Call("KVServer.PutAppend", args, reply)
+			if ok {
+				if reply.Err == OK {
+					// ck.lastLeaderId = i
+					return
+				}
+			} else {
+				continue
+			}
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
