@@ -100,25 +100,44 @@ type Raft struct {
 }
 
 // too slow...but feasible when SnapShotInterval is small.
-func (rf *Raft) getLogEntry(index int) *logEntry {
-	for i := range rf.log {
-		if rf.log[i].Index == index {
-			return &rf.log[i]
-		}
-	}
+// func (rf *Raft) getLogEntry(index int) *logEntry {
+// 	for i := range rf.log {
+// 		if rf.log[i].Index == index {
+// 			return &rf.log[i]
+// 		}
+// 	}
 
-	// little trick, pretending to have a dummy log entry.
+// 	// little trick, pretending to have a dummy log entry.
+// 	if index == rf.lastIncludedIndex {
+// 		return &logEntry{Term: rf.lastIncludedTerm, Index: rf.lastIncludedIndex}
+// 	}
+// 	return nil
+// }
+
+func (rf *Raft) getLogEntry(index int) *logEntry {
 	if index == rf.lastIncludedIndex {
 		return &logEntry{Term: rf.lastIncludedTerm, Index: rf.lastIncludedIndex}
 	}
+
+	if ridx := rf.getLogRealIndex(index); ridx != -1 {
+		return &rf.log[ridx]
+	}
+
 	return nil
 }
 
+// func (rf *Raft) getLogRealIndex(index int) int {
+// 	for i := range rf.log {
+// 		if rf.log[i].Index == index {
+// 			return i
+// 		}
+// 	}
+// 	return -1
+// }
+
 func (rf *Raft) getLogRealIndex(index int) int {
-	for i := range rf.log {
-		if rf.log[i].Index == index {
-			return i
-		}
+	if index <= rf.getLastLogIndex() && len(rf.log) > 0 {
+		return index - rf.log[0].Index
 	}
 	return -1
 }
@@ -152,7 +171,6 @@ func (rf *Raft) getPersistState() []byte {
 	e.Encode(rf.log)
 	e.Encode(rf.lastIncludedIndex)
 	e.Encode(rf.lastIncludedTerm)
-	e.Encode(rf.commitIndex)
 	data := w.Bytes()
 	return data
 }
@@ -170,13 +188,11 @@ func (rf *Raft) readPersist(data []byte) {
 	var log []logEntry
 	var lastIncludedIndex int
 	var lastIncludedTerm int
-	var commitIndex int
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
 		d.Decode(&log) != nil ||
 		d.Decode(&lastIncludedIndex) != nil ||
-		d.Decode(&lastIncludedTerm) != nil ||
-		d.Decode(&commitIndex) != nil {
+		d.Decode(&lastIncludedTerm) != nil {
 		DPrintln("read persist error")
 	} else {
 		rf.currentTerm = currentTerm
@@ -184,7 +200,6 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.log = log
 		rf.lastIncludedIndex = lastIncludedIndex
 		rf.lastIncludedTerm = lastIncludedTerm
-		rf.commitIndex = commitIndex
 	}
 }
 
@@ -513,13 +528,15 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnap
 	rf.persister.SaveStateAndSnapshot(rf.getPersistState(), args.Data)
 
 	DPrintln("IS [%s%d] applied command %d", role[rf.state], rf.me, args.LastIncludedIndex)
-	rf.applyCh <- ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotIndex: args.LastIncludedIndex + 1, SnapshotTerm: args.LastIncludedTerm}
+	// rf.applyCh <- ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotIndex: args.LastIncludedIndex + 1, SnapshotTerm: args.LastIncludedTerm} // ⛔️ should not hold the lock!
 
 	rf.rtFlag = true
 	rf.mu.Unlock()
 	if len(rf.rtCh) == 0 {
 		rf.rtCh <- 1
 	}
+
+	rf.applyCh <- ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotIndex: args.LastIncludedIndex + 1, SnapshotTerm: args.LastIncludedTerm}
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotRequest, reply *InstallSnapshotReply) bool {
@@ -873,7 +890,6 @@ func (rf *Raft) ticker() {
 										if N > rf.commitIndex && (rf.getLogEntry(N)).Term == rf.currentTerm {
 											DPrintln("[L%d] commitIndex->%d.", rf.me, rf.commitIndex)
 											rf.commitIndex = N
-											rf.persister.SaveRaftState(rf.getPersistState())
 											rf.mu.Unlock()
 										} else {
 											rf.mu.Unlock()
@@ -920,7 +936,6 @@ func (rf *Raft) applier() {
 				// If the log has been truncated, just ignore it.
 				rf.mu.Lock()
 				if i <= rf.lastIncludedIndex {
-					DPrintln("[%s%d] ignores command %d", role[rf.state], rf.me, i)
 					rf.mu.Unlock()
 					continue
 				}
@@ -929,14 +944,11 @@ func (rf *Raft) applier() {
 				rf.mu.Unlock()
 				index := i
 				rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: index + 1}
-				rf.mu.Lock()
-				DPrintln("[%s%d] applied command %d", role[rf.state], rf.me, i)
-				rf.mu.Unlock()
 			}
 			prevCommitIdx = cIdx
 		}
 
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
