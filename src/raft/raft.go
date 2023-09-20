@@ -59,8 +59,6 @@ const (
 	Leader
 )
 
-var role = []string{"F", "C", "L"}
-
 type logEntry struct {
 	Command interface{}
 	Term    int
@@ -99,21 +97,6 @@ type Raft struct {
 	lastIncludedTerm  int
 }
 
-// too slow...but feasible when SnapShotInterval is small.
-// func (rf *Raft) getLogEntry(index int) *logEntry {
-// 	for i := range rf.log {
-// 		if rf.log[i].Index == index {
-// 			return &rf.log[i]
-// 		}
-// 	}
-
-// 	// little trick, pretending to have a dummy log entry.
-// 	if index == rf.lastIncludedIndex {
-// 		return &logEntry{Term: rf.lastIncludedTerm, Index: rf.lastIncludedIndex}
-// 	}
-// 	return nil
-// }
-
 func (rf *Raft) getLogEntry(index int) *logEntry {
 	if index == rf.lastIncludedIndex {
 		return &logEntry{Term: rf.lastIncludedTerm, Index: rf.lastIncludedIndex}
@@ -125,15 +108,6 @@ func (rf *Raft) getLogEntry(index int) *logEntry {
 
 	return nil
 }
-
-// func (rf *Raft) getLogRealIndex(index int) int {
-// 	for i := range rf.log {
-// 		if rf.log[i].Index == index {
-// 			return i
-// 		}
-// 	}
-// 	return -1
-// }
 
 func (rf *Raft) getLogRealIndex(index int) int {
 	if index <= rf.getLastLogIndex() && len(rf.log) > 0 {
@@ -193,7 +167,6 @@ func (rf *Raft) readPersist(data []byte) {
 		d.Decode(&log) != nil ||
 		d.Decode(&lastIncludedIndex) != nil ||
 		d.Decode(&lastIncludedTerm) != nil {
-		DPrintln("read persist error")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
@@ -218,7 +191,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 
 	if index <= rf.lastIncludedIndex || index > rf.getLastLogIndex() {
-		DPrintln("Snapshot() index check failed")
 		rf.mu.Unlock()
 		return
 	}
@@ -253,20 +225,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
-		DPrintln("RV [%s%d] refuses to vote for [C%d]. (T1:%d \\ T2:%d)", role[rf.state], rf.me, args.CandidateId, rf.currentTerm, args.Term)
 		rf.mu.Unlock()
 		return
 	}
 
 	stepAside := false
 	if args.Term > rf.currentTerm {
-		DPrintln("RV [%s%d] T:%d->%d.", role[rf.state], rf.me, rf.currentTerm, args.Term)
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.persister.SaveRaftState(rf.getPersistState())
 		if rf.state == Leader || rf.state == Candidate {
 			stepAside = true
-			DPrintln("RV [%s%d] becomes follower before voting(or not) for [C%d]. (T1:%d \\ T2:%d)", role[rf.state], rf.me, args.CandidateId, rf.currentTerm, args.Term)
 		}
 		rf.state = Follower
 	}
@@ -284,7 +253,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.persister.SaveRaftState(rf.getPersistState())
-		DPrintln("RV [%s%d] votes for [C%d]. (T1:%d T2:%d)", role[rf.state], rf.me, args.CandidateId, rf.currentTerm, args.Term)
 
 		rf.rtFlag = true
 		rf.mu.Unlock()
@@ -293,7 +261,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	} else {
 		reply.VoteGranted = false
-		DPrintln("RV [%s%d] refuses to vote for [C%d]. (T1:%d VF:%d \\ T2:%d)", role[rf.state], rf.me, args.CandidateId, rf.currentTerm, rf.votedFor, args.Term)
 
 		if stepAside {
 			rf.rtFlag = true
@@ -394,7 +361,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// ATTENTION: consider leader cannnot step aside, brain split -> commit inconsistency?
 	if args.PrevLogIndex < rf.lastIncludedIndex {
-		DPrintln("AE(Outdated) [L%d].PrevLogIndex:%d [%s%d].lastIncludedIndex:%d", args.LeaderId, args.PrevLogIndex, role[rf.state], rf.me, rf.lastIncludedIndex)
 		reply.OutDated = true
 		rf.mu.Unlock()
 		return
@@ -404,13 +370,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		DPrintln("AE [%s%d] replies false to [L%d]. (T1:%d \\ T2:%d)", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
 		rf.mu.Unlock()
 		return
 	}
 
 	if args.Term > rf.currentTerm {
-		DPrintln("AE [%s%d] T:%d->%d.", role[rf.state], rf.me, rf.currentTerm, args.Term)
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.persister.SaveRaftState(rf.getPersistState())
@@ -424,7 +388,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex != -1 && (args.PrevLogIndex > rf.getLastLogIndex() ||
 		(rf.getLogEntry(args.PrevLogIndex) != nil && rf.getLogEntry(args.PrevLogIndex).Term != args.PrevLogTerm)) {
 		reply.Success = false
-		DPrintln("AE [%s%d] replies false to [L%d] (Consistency check failure). (T1:%d \\ T2:%d)", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
 
 		if args.PrevLogIndex > rf.getLastLogIndex() {
 			reply.ConflictIndex = rf.getLastLogIndex() + 1
@@ -435,7 +398,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	} else {
 		reply.Success = true
-		DPrintln("AE [%s%d] replies true to [L%d]. (T1:%d \\ T2:%d)", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
 
 		// what if args.PrevLogIndex == rf.lastIncludedIndex?
 		// seems to be ok, getLogRealIndex will return -1, so rf.log will be an empty slice.
@@ -447,7 +409,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
 			rf.persister.SaveRaftState(rf.getPersistState())
-			DPrintln("AE [%s%d] commitIndex->%d.", role[rf.state], rf.me, rf.commitIndex)
 		}
 	}
 
@@ -493,13 +454,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnap
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		DPrintln("IS [%s%d] replies false to [L%d]. (T1:%d \\ T2:%d)", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
 		rf.mu.Unlock()
 		return
 	}
 
 	if args.Term > rf.currentTerm {
-		DPrintln("IS [%s%d] T:%d->%d.", role[rf.state], rf.me, rf.currentTerm, args.Term)
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.state = Follower
@@ -509,7 +468,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnap
 	if args.LastIncludedTerm < rf.lastIncludedTerm || args.LastIncludedIndex <= rf.lastIncludedIndex {
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		DPrintln("IS [%s%d] replies false to [L%d]. (T1:%d \\ T2:%d)", role[rf.state], rf.me, args.LeaderId, rf.currentTerm, args.Term)
 		rf.mu.Unlock()
 		return
 	}
@@ -526,9 +484,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnap
 		rf.log = rf.log[rf.getLogRealIndex(args.LastIncludedIndex)+1:]
 	}
 	rf.persister.SaveStateAndSnapshot(rf.getPersistState(), args.Data)
-
-	DPrintln("IS [%s%d] applied command %d", role[rf.state], rf.me, args.LastIncludedIndex)
-	// rf.applyCh <- ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotIndex: args.LastIncludedIndex + 1, SnapshotTerm: args.LastIncludedTerm} // ⛔️ should not hold the lock!
 
 	rf.rtFlag = true
 	rf.mu.Unlock()
@@ -576,7 +531,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	log := logEntry{command, rf.currentTerm, index}
 	rf.log = append(rf.log, log)
 	rf.persister.SaveRaftState(rf.getPersistState())
-	DPrintln("[%s%d] appends new log at %d.", role[rf.state], rf.me, index)
 
 	rf.matchIndex[rf.me] = rf.getLastLogIndex()
 
@@ -609,7 +563,6 @@ func (rf *Raft) election(args *RequestVoteArgs) {
 	rf.mu.Lock()
 	voteSum := 0
 	isFinished := false
-	DPrintln("[%s%d] starts election...", role[rf.state], rf.me)
 	rf.mu.Unlock()
 
 	for i := range rf.peers {
@@ -622,15 +575,10 @@ func (rf *Raft) election(args *RequestVoteArgs) {
 		idx := i
 		// Send RequestVote RPCs concurrently.
 		go func(int) {
-			rf.mu.Lock()
-			DPrintln("[%s%d] sends RequestVote to [N%d]...", role[rf.state], rf.me, idx)
-			rf.mu.Unlock()
-
 			ok := rf.sendRequestVote(idx, args, reply)
 			rf.mu.Lock()
 			if ok && rf.state == Candidate && rf.currentTerm == args.Term {
 				if reply.Term > rf.currentTerm {
-					DPrintln("[C%d]'s election failed, becomming follower. (T1:%d \\ RNO: %d T2:%d)", rf.me, rf.currentTerm, idx, reply.Term)
 					rf.currentTerm = reply.Term
 					rf.persister.SaveRaftState(rf.getPersistState())
 					rf.state = Follower
@@ -649,16 +597,12 @@ func (rf *Raft) election(args *RequestVoteArgs) {
 					voteSum++
 					if (voteSum+1)*2 > len(rf.peers) {
 						rf.state = Leader
-						DPrintln("[C%d] becomes the new leader!", rf.me)
-
 						for i := range rf.matchIndex {
 							rf.matchIndex[i] = -1
 						}
-
 						for i := range rf.nextIndex {
 							rf.nextIndex[i] = rf.getLastLogIndex() + 1
 						}
-
 						if !isFinished {
 							isFinished = true
 							rf.mu.Unlock()
@@ -787,7 +731,6 @@ func (rf *Raft) ticker() {
 							defer rf.mu.Unlock()
 							if ok && rf.state == Leader && rf.currentTerm == snargs.Term {
 								if snreply.Term > rf.currentTerm {
-									DPrintln("[L%d] steps aside. (T1:%d \\ RNO: %d T2:%d)", rf.me, rf.currentTerm, idx, snreply.Term)
 									rf.currentTerm = snreply.Term
 									rf.persister.SaveRaftState(rf.getPersistState())
 									rf.state = Follower
@@ -821,8 +764,6 @@ func (rf *Raft) ticker() {
 							args.Entries = make([]logEntry, len(rf.log[rf.getLogRealIndex(rf.nextIndex[idx]):]))
 							copy(args.Entries, rf.log[rf.getLogRealIndex(rf.nextIndex[idx]):])
 						}
-
-						DPrintln("[%s%d] sends AppendEntries to [N%d]...", role[rf.state], rf.me, idx)
 						rf.mu.Unlock()
 
 						go func(int) {
@@ -834,7 +775,6 @@ func (rf *Raft) ticker() {
 							}
 							if ok && rf.state == Leader && rf.currentTerm == args.Term {
 								if reply.Term > rf.currentTerm {
-									DPrintln("[L%d] steps aside. (T1:%d \\ RNO: %d T2:%d)", rf.me, rf.currentTerm, idx, reply.Term)
 									rf.currentTerm = reply.Term
 									rf.persister.SaveRaftState(rf.getPersistState())
 									rf.state = Follower
@@ -849,12 +789,9 @@ func (rf *Raft) ticker() {
 									cp := make([]int, len(rf.matchIndex))
 									copy(cp, rf.matchIndex)
 									sort.Ints(cp)
-
 									N := cp[(len(cp)-1)/2]
-
 									// Leader can only commit log entries of its own term.
 									if N > rf.commitIndex && (rf.getLogEntry(N)).Term == rf.currentTerm {
-										DPrintln("[L%d] commitIndex->%d.", rf.me, rf.commitIndex)
 										rf.commitIndex = N
 									}
 								} else {
