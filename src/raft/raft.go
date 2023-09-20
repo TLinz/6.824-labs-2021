@@ -726,21 +726,27 @@ func (rf *Raft) ticker() {
 						rf.mu.Unlock()
 
 						go func(int) {
-							ok := rf.sendInstallSnapshot(idx, snargs, snreply)
-							rf.mu.Lock()
-							defer rf.mu.Unlock()
-							if ok && rf.state == Leader && rf.currentTerm == snargs.Term {
-								if snreply.Term > rf.currentTerm {
-									rf.currentTerm = snreply.Term
-									rf.persister.SaveRaftState(rf.getPersistState())
-									rf.state = Follower
-									return
+							timeout := time.After(2000 * time.Millisecond)
+							okCh := make(chan bool, 1)
+							select {
+							case okCh <- rf.sendInstallSnapshot(idx, snargs, snreply):
+								rf.mu.Lock()
+								defer rf.mu.Unlock()
+								ok := <-okCh
+								if ok && rf.state == Leader && rf.currentTerm == snargs.Term {
+									if snreply.Term > rf.currentTerm {
+										rf.currentTerm = snreply.Term
+										rf.persister.SaveRaftState(rf.getPersistState())
+										rf.state = Follower
+										return
+									}
+									if snreply.Success {
+										rf.matchIndex[idx] = snargs.LastIncludedIndex
+										rf.nextIndex[idx] = snargs.LastIncludedIndex + 1
+										// there is no need to update matchIndex and nextIndex here
+									}
 								}
-								if snreply.Success {
-									rf.matchIndex[idx] = snargs.LastIncludedIndex
-									rf.nextIndex[idx] = snargs.LastIncludedIndex + 1
-									// there is no need to update matchIndex and nextIndex here
-								}
+							case <-timeout:
 							}
 						}(idx)
 					} else {
@@ -767,40 +773,46 @@ func (rf *Raft) ticker() {
 						rf.mu.Unlock()
 
 						go func(int) {
-							ok := rf.sendAppendEntries(idx, args, reply)
-							rf.mu.Lock()
-							defer rf.mu.Unlock()
-							if ok && reply.OutDated {
-								return
-							}
-							if ok && rf.state == Leader && rf.currentTerm == args.Term {
-								if reply.Term > rf.currentTerm {
-									rf.currentTerm = reply.Term
-									rf.persister.SaveRaftState(rf.getPersistState())
-									rf.state = Follower
+							timeout := time.After(2000 * time.Millisecond)
+							okCh := make(chan bool, 1)
+							select {
+							case okCh <- rf.sendAppendEntries(idx, args, reply):
+								rf.mu.Lock()
+								defer rf.mu.Unlock()
+								ok := <-okCh
+								if ok && reply.OutDated {
 									return
 								}
-								if reply.Success {
-									rf.matchIndex[idx] = args.PrevLogIndex + len(args.Entries)
-									rf.nextIndex[idx] = args.PrevLogIndex + len(args.Entries) + 1
-
-									// If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,
-									// and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
-									cp := make([]int, len(rf.matchIndex))
-									copy(cp, rf.matchIndex)
-									sort.Ints(cp)
-									N := cp[(len(cp)-1)/2]
-									// Leader can only commit log entries of its own term.
-									if N > rf.commitIndex && (rf.getLogEntry(N)).Term == rf.currentTerm {
-										rf.commitIndex = N
+								if ok && rf.state == Leader && rf.currentTerm == args.Term {
+									if reply.Term > rf.currentTerm {
+										rf.currentTerm = reply.Term
+										rf.persister.SaveRaftState(rf.getPersistState())
+										rf.state = Follower
+										return
 									}
-								} else {
-									if reply.ConflictTerm != -1 && lastLog(originalLogs, reply.ConflictTerm) != -1 {
-										rf.nextIndex[idx] = lastLog(originalLogs, reply.ConflictTerm) + 1
+									if reply.Success {
+										rf.matchIndex[idx] = args.PrevLogIndex + len(args.Entries)
+										rf.nextIndex[idx] = args.PrevLogIndex + len(args.Entries) + 1
+
+										// If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,
+										// and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
+										cp := make([]int, len(rf.matchIndex))
+										copy(cp, rf.matchIndex)
+										sort.Ints(cp)
+										N := cp[(len(cp)-1)/2]
+										// Leader can only commit log entries of its own term.
+										if N > rf.commitIndex && (rf.getLogEntry(N)).Term == rf.currentTerm {
+											rf.commitIndex = N
+										}
 									} else {
-										rf.nextIndex[idx] = reply.ConflictIndex
+										if reply.ConflictTerm != -1 && lastLog(originalLogs, reply.ConflictTerm) != -1 {
+											rf.nextIndex[idx] = lastLog(originalLogs, reply.ConflictTerm) + 1
+										} else {
+											rf.nextIndex[idx] = reply.ConflictIndex
+										}
 									}
 								}
+							case <-timeout:
 							}
 						}(idx)
 					}
