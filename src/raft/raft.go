@@ -752,172 +752,125 @@ func (rf *Raft) ticker() {
 
 		} else {
 			rf.mu.Unlock()
-
-			for i := range rf.peers {
-				if i == rf.me {
-					continue
+			for {
+				if rf.killed() {
+					break
 				}
 
-				// set up goroutines for each follower to deal with AppendEntries or InstallSnapshot
-				idx := i
-				go func(int) {
-					for {
-						rf.mu.Lock()
+				rf.mu.Lock()
+				if rf.state != Leader {
+					rf.mu.Unlock()
+					break
+				}
+				rf.mu.Unlock()
 
-						if rf.killed() {
-							if rf.state == Leader {
-								rf.state = Follower // no need to become follower, since state is volatile
-								rf.rtFlag = true
-								rf.mu.Unlock()
-								if len(rf.rtCh) == 0 {
-									rf.rtCh <- 1
-								}
-							} else {
-								rf.mu.Unlock()
-							}
-							break
-						}
+				for i := range rf.peers {
+					if i == rf.me {
+						continue
+					}
+					idx := i
+					rf.mu.Lock()
+					// corresponding log has been truncated, should send InstallSnapshotRPC instead of AppendEntriesRPC
+					if rf.nextIndex[idx] <= rf.lastIncludedIndex {
+						snargs := &InstallSnapshotRequest{}
+						snreply := &InstallSnapshotReply{}
+						snargs.Term = rf.currentTerm
+						snargs.LeaderId = rf.me
+						snargs.LastIncludedIndex = rf.lastIncludedIndex
+						snargs.LastIncludedTerm = rf.lastIncludedTerm
+						snargs.Data = rf.persister.ReadSnapshot()
+						rf.mu.Unlock()
 
-						// send heartbeat periodically.
-						if rf.state != Leader {
-							rf.mu.Unlock()
-							break
-						}
-
-						// corresponding log has been truncated, should send InstallSnapshotRPC instead of AppendEntriesRPC
-						if rf.nextIndex[idx] <= rf.lastIncludedIndex {
-							snargs := &InstallSnapshotRequest{}
-							snreply := &InstallSnapshotReply{}
-							snargs.Term = rf.currentTerm
-							snargs.LeaderId = rf.me
-							snargs.LastIncludedIndex = rf.lastIncludedIndex
-							snargs.LastIncludedTerm = rf.lastIncludedTerm
-							snargs.Data = rf.persister.ReadSnapshot()
-							rf.mu.Unlock()
-							go func(int) {
-								ok := rf.sendInstallSnapshot(idx, snargs, snreply)
-								rf.mu.Lock()
-								if ok && rf.state == Leader && rf.currentTerm == snargs.Term {
-									if snreply.Term > rf.currentTerm {
-										DPrintln("[L%d] steps aside. (T1:%d \\ RNO: %d T2:%d)", rf.me, rf.currentTerm, idx, snreply.Term)
-										rf.currentTerm = snreply.Term
-										rf.persister.SaveRaftState(rf.getPersistState())
-										rf.state = Follower
-										rf.rtFlag = true
-										rf.mu.Unlock()
-										if len(rf.rtCh) == 0 {
-											rf.rtCh <- 1
-										}
-										return
-									}
-
-									if snreply.Success {
-										rf.matchIndex[idx] = snargs.LastIncludedIndex
-										rf.nextIndex[idx] = snargs.LastIncludedIndex + 1
-										// there is no need to update matchIndex and nextIndex here
-										rf.mu.Unlock()
-									} else {
-										// should we update matchIndex and nextIndex here or just consider it outdated?
-										rf.mu.Unlock()
-									}
-								} else {
-									rf.mu.Unlock()
-								}
-							}(idx)
-
-							time.Sleep(105 * time.Millisecond)
-						} else {
-
-							args := &AppendEntriesArgs{}
-							reply := &AppendEntriesReply{}
-
-							args.Term = rf.currentTerm
-							args.LeaderId = rf.me
-							args.PrevLogIndex = rf.nextIndex[idx] - 1
-
-							if args.PrevLogIndex == -1 {
-								args.PrevLogTerm = -1
-							} else {
-								args.PrevLogTerm = rf.getLogEntry(args.PrevLogIndex).Term
-							}
-							args.LeaderCommit = rf.commitIndex
-
-							originalLogs := make([]logEntry, len(rf.log))
-							copy(originalLogs, rf.log)
-							if rf.getLogRealIndex(rf.nextIndex[idx]) != -1 {
-								args.Entries = make([]logEntry, len(rf.log[rf.getLogRealIndex(rf.nextIndex[idx]):]))
-								copy(args.Entries, rf.log[rf.getLogRealIndex(rf.nextIndex[idx]):])
-							}
-
-							DPrintln("[%s%d] sends AppendEntries to [N%d]...", role[rf.state], rf.me, idx)
-							rf.mu.Unlock()
-
-							go func(int) {
-								ok := rf.sendAppendEntries(idx, args, reply)
-								rf.mu.Lock()
-								if ok && reply.OutDated {
-									rf.mu.Unlock()
+						go func(int) {
+							ok := rf.sendInstallSnapshot(idx, snargs, snreply)
+							rf.mu.Lock()
+							defer rf.mu.Unlock()
+							if ok && rf.state == Leader && rf.currentTerm == snargs.Term {
+								if snreply.Term > rf.currentTerm {
+									DPrintln("[L%d] steps aside. (T1:%d \\ RNO: %d T2:%d)", rf.me, rf.currentTerm, idx, snreply.Term)
+									rf.currentTerm = snreply.Term
+									rf.persister.SaveRaftState(rf.getPersistState())
+									rf.state = Follower
 									return
 								}
-								if ok && rf.state == Leader && rf.currentTerm == args.Term {
+								if snreply.Success {
+									rf.matchIndex[idx] = snargs.LastIncludedIndex
+									rf.nextIndex[idx] = snargs.LastIncludedIndex + 1
+									// there is no need to update matchIndex and nextIndex here
+								}
+							}
+						}(idx)
+					} else {
+						args := &AppendEntriesArgs{}
+						reply := &AppendEntriesReply{}
 
-									if reply.Term > rf.currentTerm {
-										DPrintln("[L%d] steps aside. (T1:%d \\ RNO: %d T2:%d)", rf.me, rf.currentTerm, idx, reply.Term)
-										rf.currentTerm = reply.Term
-										rf.persister.SaveRaftState(rf.getPersistState())
-										rf.state = Follower
-										rf.rtFlag = true
-										rf.mu.Unlock()
-										if len(rf.rtCh) == 0 {
-											rf.rtCh <- 1
-										}
-										return
-									}
+						args.Term = rf.currentTerm
+						args.LeaderId = rf.me
+						args.PrevLogIndex = rf.nextIndex[idx] - 1
 
-									if reply.Success {
-										rf.matchIndex[idx] = args.PrevLogIndex + len(args.Entries)
-										rf.nextIndex[idx] = args.PrevLogIndex + len(args.Entries) + 1
+						if args.PrevLogIndex == -1 {
+							args.PrevLogTerm = -1
+						} else {
+							args.PrevLogTerm = rf.getLogEntry(args.PrevLogIndex).Term
+						}
+						args.LeaderCommit = rf.commitIndex
 
-										// If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,
-										// and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
-										cp := make([]int, len(rf.matchIndex))
-										copy(cp, rf.matchIndex)
-										sort.Ints(cp)
+						originalLogs := make([]logEntry, len(rf.log))
+						copy(originalLogs, rf.log)
+						if rf.getLogRealIndex(rf.nextIndex[idx]) != -1 {
+							args.Entries = make([]logEntry, len(rf.log[rf.getLogRealIndex(rf.nextIndex[idx]):]))
+							copy(args.Entries, rf.log[rf.getLogRealIndex(rf.nextIndex[idx]):])
+						}
 
-										N := cp[(len(cp)-1)/2]
+						DPrintln("[%s%d] sends AppendEntries to [N%d]...", role[rf.state], rf.me, idx)
+						rf.mu.Unlock()
 
-										// Leader can only commit log entries of its own term.
-										if N > rf.commitIndex && (rf.getLogEntry(N)).Term == rf.currentTerm {
-											DPrintln("[L%d] commitIndex->%d.", rf.me, rf.commitIndex)
-											rf.commitIndex = N
-											rf.mu.Unlock()
-										} else {
-											rf.mu.Unlock()
-										}
-									} else {
-										if reply.ConflictTerm != -1 && lastLog(originalLogs, reply.ConflictTerm) != -1 {
-											rf.nextIndex[idx] = lastLog(originalLogs, reply.ConflictTerm) + 1
-										} else {
-											rf.nextIndex[idx] = reply.ConflictIndex
-										}
-										rf.mu.Unlock()
+						go func(int) {
+							ok := rf.sendAppendEntries(idx, args, reply)
+							rf.mu.Lock()
+							defer rf.mu.Unlock()
+							if ok && reply.OutDated {
+								return
+							}
+							if ok && rf.state == Leader && rf.currentTerm == args.Term {
+								if reply.Term > rf.currentTerm {
+									DPrintln("[L%d] steps aside. (T1:%d \\ RNO: %d T2:%d)", rf.me, rf.currentTerm, idx, reply.Term)
+									rf.currentTerm = reply.Term
+									rf.persister.SaveRaftState(rf.getPersistState())
+									rf.state = Follower
+									return
+								}
+								if reply.Success {
+									rf.matchIndex[idx] = args.PrevLogIndex + len(args.Entries)
+									rf.nextIndex[idx] = args.PrevLogIndex + len(args.Entries) + 1
+
+									// If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,
+									// and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
+									cp := make([]int, len(rf.matchIndex))
+									copy(cp, rf.matchIndex)
+									sort.Ints(cp)
+
+									N := cp[(len(cp)-1)/2]
+
+									// Leader can only commit log entries of its own term.
+									if N > rf.commitIndex && (rf.getLogEntry(N)).Term == rf.currentTerm {
+										DPrintln("[L%d] commitIndex->%d.", rf.me, rf.commitIndex)
+										rf.commitIndex = N
 									}
 								} else {
-									rf.mu.Unlock()
+									if reply.ConflictTerm != -1 && lastLog(originalLogs, reply.ConflictTerm) != -1 {
+										rf.nextIndex[idx] = lastLog(originalLogs, reply.ConflictTerm) + 1
+									} else {
+										rf.nextIndex[idx] = reply.ConflictIndex
+									}
 								}
-							}(idx)
-
-							time.Sleep(105 * time.Millisecond) // need to be small enough to pass 2c's unreliable test.
-						}
+							}
+						}(idx)
 					}
-				}(idx)
+				}
+
+				time.Sleep(105 * time.Millisecond)
 			}
-
-			<-rf.rtCh
-			rf.mu.Lock()
-			rf.rtFlag = false
-			rf.mu.Unlock()
-
 		}
 	}
 }
