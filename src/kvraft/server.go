@@ -4,6 +4,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"6.824/labgob"
 	"6.824/labrpc"
@@ -56,6 +57,8 @@ func (kv *KVServer) applyCmd(cmd Op) {
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	command := Op{args.ClientId, args.CommandId, "Get", args.Key, ""}
 	idx, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
@@ -67,19 +70,20 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		if kv.killed() {
 			return
 		}
+		timeout := time.After(2000 * time.Millisecond)
 		select {
-		case msg := <-kv.applyCh:
+		case msg := <-kv.applyCh: // considering Get() and Put() concurrently read applyCh...
 			cmd := msg.Command.(Op)
 			// check if the cmd is dulplicated
-			kv.mu.Lock()
 			if cmd.CommandId <= kv.cmap[cmd.ClientId] {
-				if msg.CommandIndex == idx {
+				if msg.CommandIndex == idx && cmd == command {
 					reply.Err = OK
 					reply.Value = kv.kv[cmd.Key]
-					kv.mu.Unlock()
+					return
+				} else if msg.CommandIndex == idx && cmd != command {
+					reply.Err = ErrWrongLeader
 					return
 				}
-				kv.mu.Unlock()
 				continue
 			}
 			// apply the command to state machine and update cmap
@@ -92,27 +96,28 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 					if ok {
 						reply.Err = OK
 						reply.Value = v
-						kv.mu.Unlock()
 						return
 					} else {
 						reply.Err = ErrNoKey
 						reply.Value = ""
-						kv.mu.Unlock()
 						return
 					}
 				} else {
 					reply.Err = ErrWrongLeader
-					kv.mu.Unlock()
 					return
 				}
 			}
-			kv.mu.Unlock()
+		case <-timeout:
+			reply.Err = ErrWrongLeader
+			return
 		}
 	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	command := Op{args.ClientId, args.CommandId, args.Op, args.Key, args.Value}
 	idx, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
@@ -124,18 +129,19 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		if kv.killed() {
 			return
 		}
+		timeout := time.After(2000 * time.Millisecond)
 		select {
-		case msg := <-kv.applyCh:
+		case msg := <-kv.applyCh: // considering Get() and Put() concurrently read applyCh...
 			cmd := msg.Command.(Op)
 			// check if the cmd is dulplicated
-			kv.mu.Lock()
 			if cmd.CommandId <= kv.cmap[cmd.ClientId] {
-				if msg.CommandIndex == idx {
+				if msg.CommandIndex == idx && cmd == command {
 					reply.Err = OK
-					kv.mu.Unlock()
+					return
+				} else if msg.CommandIndex == idx && cmd != command {
+					reply.Err = ErrWrongLeader
 					return
 				}
-				kv.mu.Unlock()
 				continue
 			}
 			// apply the command to state machine and update cmap
@@ -145,15 +151,15 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			if msg.CommandIndex == idx {
 				if cmd == command {
 					reply.Err = OK
-					kv.mu.Unlock()
 					return
 				} else {
 					reply.Err = ErrWrongLeader
-					kv.mu.Unlock()
 					return
 				}
 			}
-			kv.mu.Unlock()
+		case <-timeout:
+			reply.Err = ErrWrongLeader
+			return
 		}
 	}
 }

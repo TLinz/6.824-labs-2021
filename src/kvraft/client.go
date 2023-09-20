@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"math/big"
 	"sync"
+	"time"
 
 	"6.824/labrpc"
 )
@@ -53,21 +54,29 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 	ck.commandId += 1
 	DPrintln("[C%d:%d] Get key:%s", ck.clerkId, ck.commandId, key)
+
 	for {
-		for _, srv := range ck.servers {
+		for i := range ck.servers {
+			srv := ck.servers[(i+ck.lastLeaderId)%len(ck.servers)]
 			args := &GetArgs{ck.clerkId, ck.commandId, key}
 			reply := &GetReply{}
-			ok := srv.Call("KVServer.Get", args, reply)
-			if ok {
-				if reply.Err == OK {
-					DPrintln("success [C%d:%d] Get key:%s value:%s", ck.clerkId, ck.commandId, key, reply.Value)
-					// ck.lastLeaderId = i
-					return reply.Value
-				} else if reply.Err == ErrNoKey {
-					// ck.lastLeaderId = i
-					return ""
+
+			timeout := time.After(2000 * time.Millisecond)
+
+			okCh := make(chan bool, 1)
+			select {
+			case okCh <- srv.Call("KVServer.Get", args, reply):
+				if <-okCh {
+					if reply.Err == OK {
+						DPrintln("success [C%d:%d] Get key:%s value:%s", ck.clerkId, ck.commandId, key, reply.Value)
+						ck.lastLeaderId = i
+						return reply.Value
+					} else if reply.Err == ErrNoKey {
+						ck.lastLeaderId = i
+						return ""
+					}
 				}
-			} else {
+			case <-timeout:
 				continue
 			}
 		}
@@ -86,17 +95,26 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.commandId += 1
 	DPrintln("[C%d:%d] %s key:%s value:%s", ck.clerkId, ck.commandId, op, key, value)
 	for {
-		for _, srv := range ck.servers {
+		for i := range ck.servers {
+			srv := ck.servers[(i+ck.lastLeaderId)%len(ck.servers)]
 			args := &PutAppendArgs{key, value, op, ck.clerkId, ck.commandId}
 			reply := &PutAppendReply{}
-			ok := srv.Call("KVServer.PutAppend", args, reply)
-			if ok {
-				if reply.Err == OK {
-					DPrintln("success [C%d:%d] %s key:%s value:%s", ck.clerkId, ck.commandId, op, key, value)
-					// ck.lastLeaderId = i
-					return
+
+			timeout := time.After(2000 * time.Millisecond)
+
+			okCh := make(chan bool, 1)
+			select {
+			case okCh <- srv.Call("KVServer.PutAppend", args, reply):
+				if <-okCh {
+					if reply.Err == OK {
+						DPrintln("success [C%d:%d] %s key:%s value:%s", ck.clerkId, ck.commandId, op, key, value)
+						ck.lastLeaderId = i
+						return
+					}
+				} else {
+					continue
 				}
-			} else {
+			case <-timeout:
 				continue
 			}
 		}

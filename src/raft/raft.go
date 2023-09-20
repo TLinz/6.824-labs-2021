@@ -988,5 +988,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-// TOTHINK：
-// 1. When sending to rf.rtCh, should be better to check rf.Flag == false to avoid duplicate sending. (this should be much more safer than current implementation)
+/*
+TOTHINK：
+1. When sending to rf.rtCh, should be better to check rf.Flag == false to avoid duplicate sending. (this should be much more safer than current implementation)
+2. Cannnot just rely on ok to detect timeout!
+	go func(int) {
+		ok := rf.sendInstallSnapshot(idx, snargs, snreply)
+		if ok {
+			...
+		} else {
+			...
+		}
+	}(idx) So this goroutine may never return!
+3. TODO: detect goroutine leak!
+*/
