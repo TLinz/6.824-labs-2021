@@ -1,4 +1,4 @@
-- [x]  Lab1 : MapReduce
+- [x]  Lab1_: MapReduce
 - [x]  Lab2A: leader election
 - [x]  Lab2B: log
 - [x]  Lab2C: persistence
