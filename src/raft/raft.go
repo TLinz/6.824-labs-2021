@@ -111,6 +111,7 @@ func (rf *Raft) getLogEntry(index int) *logEntry {
 	if index == rf.lastIncludedIndex {
 		return &logEntry{Term: rf.lastIncludedTerm, Index: rf.lastIncludedIndex}
 	}
+	DPrintln("error: index:%d, lastIncludedIndex:%d, lastLogIndex:%d", index, rf.lastIncludedIndex, rf.getLastLogIndex())
 	return nil
 }
 
@@ -644,7 +645,7 @@ func (rf *Raft) ticker() {
 		rf.mu.Lock() // may stuck here if send data to rf.rtCh or ch(election) while holding the lock.
 
 		if rf.rtFlag {
-			DPrintln("warning: redundant reset")
+			// DPrintln("warning: redundant reset")
 			<-rf.rtCh
 			rf.rtFlag = false
 		}
@@ -660,7 +661,7 @@ func (rf *Raft) ticker() {
 				// timeout, start election...
 				rf.mu.Lock()
 				if rf.rtFlag {
-					DPrintln("warning: redundant reset")
+					// DPrintln("warning: redundant reset")
 					<-rf.rtCh
 					rf.rtFlag = false
 				} else {
@@ -690,7 +691,7 @@ func (rf *Raft) ticker() {
 			case <-time.After(time.Duration(interval) * time.Millisecond):
 				rf.mu.Lock()
 				if rf.rtFlag {
-					DPrintln("warning: redundant reset")
+					// DPrintln("warning: redundant reset")
 					<-rf.rtCh
 					rf.rtFlag = false
 				} else if rf.state == Candidate {
@@ -855,11 +856,16 @@ func (rf *Raft) applier() {
 					rf.mu.Unlock()
 					continue
 				}
-				logCommited := rf.getLogEntry(i)
-				command := logCommited.Command
-				rf.mu.Unlock()
-				index := i
-				rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: index + 1}
+				if i > rf.lastIncludedIndex && i <= rf.commitIndex {
+					logCommited := rf.getLogEntry(i)
+					command := logCommited.Command // panic: runtime error: invalid memory address or nil pointer dereference, occurred in both 3A and 3B.
+					rf.mu.Unlock()
+					index := i
+					rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: index + 1}
+				} else {
+					DPrintln("error: index:%d, lastIncludedIndex:%d, commitIndex:%d", i, rf.lastIncludedIndex, rf.commitIndex)
+					rf.mu.Unlock()
+				}
 			}
 			prevCommitIdx = cIdx
 		}
