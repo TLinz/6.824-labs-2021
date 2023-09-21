@@ -95,6 +95,9 @@ type Raft struct {
 	// Persistent state on all servers (2D)
 	lastIncludedIndex int
 	lastIncludedTerm  int
+
+	hasReq   bool
+	hasReqCh chan int
 }
 
 func (rf *Raft) getLogEntry(index int) *logEntry {
@@ -534,7 +537,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	rf.matchIndex[rf.me] = rf.getLastLogIndex()
 
+	rf.hasReq = true
 	rf.mu.Unlock()
+
 	return index + 1, term, true
 }
 
@@ -818,7 +823,12 @@ func (rf *Raft) ticker() {
 					}
 				}
 
-				time.Sleep(105 * time.Millisecond)
+				// time.Sleep(105 * time.Millisecond)
+				heartBeatInterval := time.After(105 * time.Millisecond)
+				select {
+				case <-heartBeatInterval:
+				case <-rf.hasReqCh:
+				}
 			}
 		}
 	}
@@ -854,6 +864,20 @@ func (rf *Raft) applier() {
 	}
 }
 
+func (rf *Raft) reqDetector() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		if rf.hasReq {
+			rf.hasReq = false
+			rf.mu.Unlock()
+			rf.hasReqCh <- 1
+		} else {
+			rf.mu.Unlock()
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -883,6 +907,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastIncludedIndex = -1
 	rf.lastIncludedTerm = -1
 
+	rf.hasReqCh = make(chan int)
+
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
 	for i := range rf.matchIndex {
@@ -898,6 +924,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	go rf.applier()
+	go rf.reqDetector()
 
 	return rf
 }
