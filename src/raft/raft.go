@@ -101,20 +101,24 @@ type Raft struct {
 }
 
 func (rf *Raft) getLogEntry(index int) *logEntry {
+	for i := range rf.log {
+		if rf.log[i].Index == index {
+			return &rf.log[i]
+		}
+	}
+
+	// little trick, pretending to have a dummy log entry.
 	if index == rf.lastIncludedIndex {
 		return &logEntry{Term: rf.lastIncludedTerm, Index: rf.lastIncludedIndex}
 	}
-
-	if ridx := rf.getLogRealIndex(index); ridx != -1 {
-		return &rf.log[ridx]
-	}
-
 	return nil
 }
 
 func (rf *Raft) getLogRealIndex(index int) int {
-	if index <= rf.getLastLogIndex() && len(rf.log) > 0 {
-		return index - rf.log[0].Index
+	for i := range rf.log {
+		if rf.log[i].Index == index {
+			return i
+		}
 	}
 	return -1
 }
@@ -928,18 +932,3 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	return rf
 }
-
-/*
-TOTHINK：
-1. When sending to rf.rtCh, should be better to check rf.Flag == false to avoid duplicate sending. (this should be much more safer than current implementation)
-2. Cannnot just rely on ok to detect timeout!
-	go func(int) {
-		ok := rf.sendInstallSnapshot(idx, snargs, snreply)
-		if ok {
-			...
-		} else {
-			...
-		}
-	}(idx) So this goroutine may never return!
-3. TODO: detect goroutine leak!
-*/

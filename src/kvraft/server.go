@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,7 +38,8 @@ type KVServer struct {
 	lastCmdIndex int
 	lastCmd      Op
 
-	bigmu sync.Mutex
+	bigmu     sync.Mutex
+	persister *raft.Persister
 }
 
 func (kv *KVServer) applyCmd(cmd Op) {
@@ -62,6 +64,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Unlock()
 		return
 	}
+	DPrintln("[k%d] cli-cmd-id:%d Get", kv.me, args.CommandId)
 	kv.mu.Unlock()
 
 	timeout := time.After(2000 * time.Millisecond)
@@ -73,6 +76,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			return
 		default:
 			kv.mu.Lock()
+			DPrintln("[k%d] idx:%d lastCmdIndex:%d", kv.me, idx, kv.lastCmdIndex)
 			if idx == kv.lastCmdIndex {
 				if command == kv.lastCmd {
 					v, ok := kv.kv[command.Key]
@@ -98,11 +102,27 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 }
 
+func (kv *KVServer) takeSnapshot() {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.maxraftstate)
+	e.Encode(kv.cmap)
+	e.Encode(kv.kv)
+	e.Encode(kv.lastCmdIndex)
+	e.Encode(kv.lastCmd)
+	snapshot := w.Bytes()
+	DPrintln("[k%d] take snapshot lastCmdIndex:%d", kv.me, kv.lastCmdIndex)
+	kv.rf.Snapshot(kv.lastCmdIndex, snapshot)
+}
+
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.bigmu.Lock()
 	defer kv.bigmu.Unlock()
 
 	kv.mu.Lock()
+	// if kv.maxraftstate != -1 && kv.persister.RaftStateSize() > kv.maxraftstate/2 {
+	// 	kv.takeSnapshot()
+	// }
 	command := Op{args.ClientId, args.CommandId, args.Op, args.Key, args.Value}
 	idx, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
@@ -110,6 +130,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mu.Unlock()
 		return
 	}
+	DPrintln("[k%d] cli-cmd-id:%d %s", kv.me, args.CommandId, args.Op)
 	kv.mu.Unlock()
 
 	timeout := time.After(2000 * time.Millisecond)
@@ -121,6 +142,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			return
 		default:
 			kv.mu.Lock()
+			DPrintln("[k%d] idx:%d lastCmdIndex:%d", kv.me, idx, kv.lastCmdIndex)
 			if idx == kv.lastCmdIndex {
 				if command == kv.lastCmd {
 					reply.Err = OK
@@ -140,20 +162,27 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) applier() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
-		cmd := msg.Command.(Op)
-		kv.mu.Lock()
-		if cmd.CommandId <= kv.cmap[cmd.ClientId] {
+		if msg.CommandValid {
+			cmd := msg.Command.(Op)
+			DPrintln("[k%d] applier cmd:%d", kv.me, msg.CommandIndex)
+			kv.mu.Lock()
+			if cmd.CommandId <= kv.cmap[cmd.ClientId] {
+				kv.lastCmdIndex = msg.CommandIndex
+				kv.lastCmd = msg.Command.(Op)
+				kv.mu.Unlock()
+				continue
+			}
+			// apply the command to state machine and update cmap
+			kv.applyCmd(cmd)
+			kv.cmap[cmd.ClientId] = cmd.CommandId
 			kv.lastCmdIndex = msg.CommandIndex
 			kv.lastCmd = msg.Command.(Op)
 			kv.mu.Unlock()
-			continue
+		} else if msg.SnapshotValid {
+			kv.mu.Lock()
+			kv.readPersist(msg.Snapshot)
+			kv.mu.Unlock()
 		}
-		// apply the command to state machine and update cmap
-		kv.applyCmd(cmd)
-		kv.cmap[cmd.ClientId] = cmd.CommandId
-		kv.lastCmdIndex = msg.CommandIndex
-		kv.lastCmd = msg.Command.(Op)
-		kv.mu.Unlock()
 	}
 }
 
@@ -204,7 +233,68 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.cmap = make(map[int]int)
 	kv.kv = make(map[string]string)
 
+	kv.persister = persister
+
 	go kv.applier()
 
+	if maxraftstate != -1 {
+		kv.mu.Lock()
+		kv.readPersist(persister.ReadSnapshot())
+		kv.mu.Unlock()
+
+		go func() {
+			for !kv.killed() {
+				kv.mu.Lock()
+				statesz := persister.RaftStateSize()
+				if statesz > kv.maxraftstate {
+					DPrintln("[k%d] raft state size overflow", kv.me)
+					w := new(bytes.Buffer)
+					e := labgob.NewEncoder(w)
+					e.Encode(kv.maxraftstate)
+					e.Encode(kv.cmap)
+					e.Encode(kv.kv)
+					e.Encode(kv.lastCmdIndex)
+					e.Encode(kv.lastCmd)
+					snapshot := w.Bytes()
+
+					DPrintln("[k%d] take snapshot lastCmdIndex:%d", kv.me, kv.lastCmdIndex)
+
+					kv.rf.Snapshot(kv.lastCmdIndex, snapshot)
+					kv.mu.Unlock()
+				} else {
+					kv.mu.Unlock()
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+		}()
+	}
+
 	return kv
+}
+
+// restore previously persisted state.
+func (kv *KVServer) readPersist(data []byte) {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var maxraftstate int
+	var cmap map[int]int
+	var kvmap map[string]string
+	var lastCmdIndex int
+	var lastCmd Op
+	if d.Decode(&maxraftstate) != nil ||
+		d.Decode(&cmap) != nil ||
+		d.Decode(&kvmap) != nil ||
+		d.Decode(&lastCmdIndex) != nil ||
+		d.Decode(&lastCmd) != nil {
+	} else {
+		kv.maxraftstate = maxraftstate
+		kv.cmap = cmap
+		kv.kv = kvmap
+		kv.lastCmdIndex = lastCmdIndex
+		kv.lastCmd = lastCmd
+	}
 }
