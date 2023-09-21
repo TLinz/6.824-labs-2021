@@ -1,7 +1,6 @@
 package kvraft
 
 import (
-	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,15 +9,6 @@ import (
 	"6.824/labrpc"
 	"6.824/raft"
 )
-
-const Debug = false
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug {
-		log.Printf(format, a...)
-	}
-	return
-}
 
 type Op struct {
 	// Your definitions here.
@@ -43,6 +33,11 @@ type KVServer struct {
 	// Your definitions here.
 	cmap map[int]int       // client id to max applied command id
 	kv   map[string]string // database
+
+	lastCmdIndex int
+	lastCmd      Op
+
+	bigmu sync.Mutex
 }
 
 func (kv *KVServer) applyCmd(cmd Op) {
@@ -56,111 +51,109 @@ func (kv *KVServer) applyCmd(cmd Op) {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	kv.bigmu.Lock()
+	defer kv.bigmu.Unlock()
+
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	command := Op{args.ClientId, args.CommandId, "Get", args.Key, ""}
 	idx, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
 		return
 	}
-	// loop to read applyCh until commandIndex == idx
-	for {
-		if kv.killed() {
-			return
-		}
-		timeout := time.After(2000 * time.Millisecond)
-		select {
-		case msg := <-kv.applyCh: // considering Get() and Put() concurrently read applyCh...
-			cmd := msg.Command.(Op)
-			// check if the cmd is dulplicated
-			if cmd.CommandId <= kv.cmap[cmd.ClientId] {
-				if msg.CommandIndex == idx && cmd == command {
-					reply.Err = OK
-					reply.Value = kv.kv[cmd.Key]
-					return
-				} else if msg.CommandIndex == idx && cmd != command {
-					reply.Err = ErrWrongLeader
-					return
-				}
-				continue
-			}
-			// apply the command to state machine and update cmap
-			kv.applyCmd(cmd)
-			kv.cmap[cmd.ClientId] = cmd.CommandId
+	kv.mu.Unlock()
 
-			if msg.CommandIndex == idx {
-				if cmd == command {
-					v, ok := kv.kv[cmd.Key]
+	timeout := time.After(2000 * time.Millisecond)
+
+	for !kv.killed() {
+		select {
+		case <-timeout:
+			reply.Err = ErrWrongLeader
+			return
+		default:
+			kv.mu.Lock()
+			if idx == kv.lastCmdIndex {
+				if command == kv.lastCmd {
+					v, ok := kv.kv[command.Key]
 					if ok {
 						reply.Err = OK
 						reply.Value = v
+						kv.mu.Unlock()
 						return
 					} else {
 						reply.Err = ErrNoKey
 						reply.Value = ""
+						kv.mu.Unlock()
 						return
 					}
-				} else {
-					reply.Err = ErrWrongLeader
-					return
 				}
+				reply.Err = ErrWrongLeader
+				kv.mu.Unlock()
+				return
 			}
-		case <-timeout:
-			reply.Err = ErrWrongLeader
-			return
+			kv.mu.Unlock()
+			time.Sleep(5 * time.Millisecond)
 		}
 	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	kv.bigmu.Lock()
+	defer kv.bigmu.Unlock()
+
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	command := Op{args.ClientId, args.CommandId, args.Op, args.Key, args.Value}
 	idx, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
 		return
 	}
-	// loop to read applyCh until commandIndex == idx
-	for {
-		if kv.killed() {
-			return
-		}
-		timeout := time.After(2000 * time.Millisecond)
-		select {
-		case msg := <-kv.applyCh: // considering Get() and Put() concurrently read applyCh...
-			cmd := msg.Command.(Op)
-			// check if the cmd is dulplicated
-			if cmd.CommandId <= kv.cmap[cmd.ClientId] {
-				if msg.CommandIndex == idx && cmd == command {
-					reply.Err = OK
-					return
-				} else if msg.CommandIndex == idx && cmd != command {
-					reply.Err = ErrWrongLeader
-					return
-				}
-				continue
-			}
-			// apply the command to state machine and update cmap
-			kv.applyCmd(cmd)
-			kv.cmap[cmd.ClientId] = cmd.CommandId
+	kv.mu.Unlock()
 
-			if msg.CommandIndex == idx {
-				if cmd == command {
-					reply.Err = OK
-					return
-				} else {
-					reply.Err = ErrWrongLeader
-					return
-				}
-			}
+	timeout := time.After(2000 * time.Millisecond)
+
+	for !kv.killed() {
+		select {
 		case <-timeout:
 			reply.Err = ErrWrongLeader
 			return
+		default:
+			kv.mu.Lock()
+			if idx == kv.lastCmdIndex {
+				if command == kv.lastCmd {
+					reply.Err = OK
+					kv.mu.Unlock()
+					return
+				}
+				reply.Err = ErrWrongLeader
+				kv.mu.Unlock()
+				return
+			}
+			kv.mu.Unlock()
+			time.Sleep(5 * time.Millisecond)
 		}
+	}
+}
+
+func (kv *KVServer) applier() {
+	for !kv.killed() {
+		msg := <-kv.applyCh
+		cmd := msg.Command.(Op)
+		kv.mu.Lock()
+		if cmd.CommandId <= kv.cmap[cmd.ClientId] {
+			kv.lastCmdIndex = msg.CommandIndex
+			kv.lastCmd = msg.Command.(Op)
+			kv.mu.Unlock()
+			continue
+		}
+		// apply the command to state machine and update cmap
+		kv.applyCmd(cmd)
+		kv.cmap[cmd.ClientId] = cmd.CommandId
+		kv.lastCmdIndex = msg.CommandIndex
+		kv.lastCmd = msg.Command.(Op)
+		kv.mu.Unlock()
 	}
 }
 
@@ -204,14 +197,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
-	// You may need initialization code here.
-
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
 	kv.cmap = make(map[int]int)
 	kv.kv = make(map[string]string)
+
+	go kv.applier()
 
 	return kv
 }
