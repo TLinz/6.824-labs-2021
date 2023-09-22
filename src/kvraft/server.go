@@ -227,7 +227,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 				kv.mu.Lock()
 				statesz := persister.RaftStateSize()
 				if statesz > kv.maxraftstate {
-					DPrintln("[k%d] raft state size overflow", kv.me)
 					w := new(bytes.Buffer)
 					e := labgob.NewEncoder(w)
 					e.Encode(kv.maxraftstate)

@@ -53,7 +53,6 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
 	ck.commandId += 1
-	DPrintln("[C%d:%d] Get key:%s", ck.clerkId, ck.commandId, key)
 
 	for {
 		for i := range ck.servers {
@@ -68,7 +67,6 @@ func (ck *Clerk) Get(key string) string {
 			case okCh <- srv.Call("KVServer.Get", args, reply):
 				if <-okCh {
 					if reply.Err == OK {
-						DPrintln("success [C%d:%d] Get key:%s value:%s", ck.clerkId, ck.commandId, key, reply.Value)
 						ck.lastLeaderId = i
 						return reply.Value
 					} else if reply.Err == ErrNoKey {
@@ -93,7 +91,6 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.commandId += 1
-	DPrintln("[C%d:%d] %s key:%s value:%s", ck.clerkId, ck.commandId, op, key, value)
 	for {
 		for i := range ck.servers {
 			srv := ck.servers[(i+ck.lastLeaderId)%len(ck.servers)]
@@ -107,7 +104,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			case okCh <- srv.Call("KVServer.PutAppend", args, reply):
 				if <-okCh {
 					if reply.Err == OK {
-						DPrintln("success [C%d:%d] %s key:%s value:%s", ck.clerkId, ck.commandId, op, key, value)
 						ck.lastLeaderId = i
 						return
 					}
