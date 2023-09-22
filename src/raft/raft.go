@@ -201,8 +201,8 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	index = index - 1
 	rf.mu.Lock()
 
-	if index <= rf.lastIncludedIndex || index > rf.getLastLogIndex() {
-		Debug(dError, "S%d SN err index:%d, LII:%d, LLI:%d", rf.me, index, rf.lastIncludedIndex, rf.getLastLogIndex())
+	if index <= rf.lastIncludedIndex || index > rf.commitIndex {
+		Debug(dError, "S%d SN err index:%d, LII:%d, CI:%d", rf.me, index, rf.lastIncludedIndex, rf.commitIndex)
 		rf.mu.Unlock()
 		return
 	}
@@ -412,15 +412,36 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} else {
 		reply.Success = true
 
-		// what if args.PrevLogIndex == rf.lastIncludedIndex?
-		// seems to be ok, getLogRealIndex will return -1, so rf.log will be an empty slice.
-		if args.PrevLogIndex == rf.lastIncludedIndex {
-			rf.log = []logEntry{}
-		} else {
-			rf.log = rf.log[:rf.getLogRealIndex(args.PrevLogIndex)+1]
+		idx := args.PrevLogIndex + 1
+		isConflict := false
+		endIdx := -1
+		if rf.getLastLogIndex() > args.PrevLogIndex {
+			for i := range args.Entries {
+				if idx == rf.getLastLogIndex()+1 {
+					break
+				}
+
+				if args.Entries[i] == *rf.getLogEntry(idx) {
+					idx++
+				} else {
+					isConflict = true
+					endIdx = i
+					break
+				}
+			}
 		}
-		rf.log = append(rf.log, args.Entries...)
-		rf.persister.SaveRaftState(rf.getPersistState())
+
+		if isConflict {
+			rf.log = rf.log[:rf.getLogRealIndex(idx)]
+			rf.log = append(rf.log, args.Entries[endIdx:]...)
+			rf.persister.SaveRaftState(rf.getPersistState())
+		} else {
+			if idx == rf.getLastLogIndex()+1 {
+				rf.log = rf.log[:rf.getLogRealIndex(args.PrevLogIndex)+1]
+				rf.log = append(rf.log, args.Entries...)
+				rf.persister.SaveRaftState(rf.getPersistState())
+			}
+		}
 
 		// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 		if args.LeaderCommit > rf.commitIndex {
