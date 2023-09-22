@@ -64,7 +64,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Unlock()
 		return
 	}
-	DPrintln("[k%d] cli-cmd-id:%d Get", kv.me, args.CommandId)
 	kv.mu.Unlock()
 
 	timeout := time.After(2000 * time.Millisecond)
@@ -76,7 +75,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			return
 		default:
 			kv.mu.Lock()
-			DPrintln("[k%d] idx:%d lastCmdIndex:%d", kv.me, idx, kv.lastCmdIndex)
 			if idx == kv.lastCmdIndex {
 				if command == kv.lastCmd {
 					v, ok := kv.kv[command.Key]
@@ -102,27 +100,11 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 }
 
-func (kv *KVServer) takeSnapshot() {
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(kv.maxraftstate)
-	e.Encode(kv.cmap)
-	e.Encode(kv.kv)
-	e.Encode(kv.lastCmdIndex)
-	e.Encode(kv.lastCmd)
-	snapshot := w.Bytes()
-	DPrintln("[k%d] take snapshot lastCmdIndex:%d", kv.me, kv.lastCmdIndex)
-	kv.rf.Snapshot(kv.lastCmdIndex, snapshot)
-}
-
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.bigmu.Lock()
 	defer kv.bigmu.Unlock()
 
 	kv.mu.Lock()
-	// if kv.maxraftstate != -1 && kv.persister.RaftStateSize() > kv.maxraftstate/2 {
-	// 	kv.takeSnapshot()
-	// }
 	command := Op{args.ClientId, args.CommandId, args.Op, args.Key, args.Value}
 	idx, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
@@ -130,7 +112,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mu.Unlock()
 		return
 	}
-	DPrintln("[k%d] cli-cmd-id:%d %s", kv.me, args.CommandId, args.Op)
 	kv.mu.Unlock()
 
 	timeout := time.After(2000 * time.Millisecond)
@@ -142,7 +123,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			return
 		default:
 			kv.mu.Lock()
-			DPrintln("[k%d] idx:%d lastCmdIndex:%d", kv.me, idx, kv.lastCmdIndex)
 			if idx == kv.lastCmdIndex {
 				if command == kv.lastCmd {
 					reply.Err = OK
@@ -164,7 +144,6 @@ func (kv *KVServer) applier() {
 		msg := <-kv.applyCh
 		if msg.CommandValid {
 			cmd := msg.Command.(Op)
-			DPrintln("[k%d] applier cmd:%d", kv.me, msg.CommandIndex)
 			kv.mu.Lock()
 			if cmd.CommandId <= kv.cmap[cmd.ClientId] {
 				kv.lastCmdIndex = msg.CommandIndex
@@ -183,6 +162,7 @@ func (kv *KVServer) applier() {
 			kv.readPersist(msg.Snapshot)
 			kv.mu.Unlock()
 		}
+		time.Sleep(time.Millisecond * 10)
 	}
 }
 
@@ -226,7 +206,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
-	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.applyCh = make(chan raft.ApplyMsg, 10)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
@@ -257,8 +237,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 					e.Encode(kv.lastCmd)
 					snapshot := w.Bytes()
 
-					DPrintln("[k%d] take snapshot lastCmdIndex:%d", kv.me, kv.lastCmdIndex)
-
 					kv.rf.Snapshot(kv.lastCmdIndex, snapshot)
 					kv.mu.Unlock()
 				} else {
@@ -268,7 +246,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 			}
 		}()
 	}
-
 	return kv
 }
 

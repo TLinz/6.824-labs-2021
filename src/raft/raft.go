@@ -83,8 +83,8 @@ type Raft struct {
 	log         []logEntry // Index starts at 1
 
 	// Volatile state on all servers.
-	commitIndex int
-	lastApplied int
+	commitIndex      int
+	lastAppliedIndex int
 
 	// Volatile state on leaders.
 	nextIndex  []int
@@ -771,6 +771,8 @@ func (rf *Raft) ticker() {
 							args.PrevLogTerm = -1
 						} else {
 							args.PrevLogTerm = rf.getLogEntry(args.PrevLogIndex).Term
+							// ❌ 2023/09/22 10:22:56 error: index:124, lastIncludedIndex:123, lastLogIndex:123
+							// ❌ panic: runtime error: invalid memory address or nil pointer dereference
 						}
 						args.LeaderCommit = rf.commitIndex
 
@@ -840,37 +842,27 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) applier() {
-	rf.mu.Lock()
-	// prevCommitIdx := -1
-	prevCommitIdx := rf.lastIncludedIndex
-	rf.mu.Unlock()
 	for !rf.killed() {
 		rf.mu.Lock()
-		cIdx := rf.commitIndex
-		rf.mu.Unlock()
-		if prevCommitIdx != cIdx {
-			for i := prevCommitIdx + 1; i <= cIdx; i++ {
-				// If the log has been truncated, just ignore it.
-				rf.mu.Lock()
-				if i <= rf.lastIncludedIndex {
+		if rf.lastAppliedIndex < rf.commitIndex {
+			for i := rf.lastAppliedIndex + 1; i <= rf.commitIndex; i++ {
+				lastIncludedIndex := rf.lastIncludedIndex
+				if i > lastIncludedIndex {
+					logEntry := rf.getLogEntry(i)
+					applyMsg := ApplyMsg{CommandValid: true, Command: logEntry.Command, CommandIndex: logEntry.Index + 1}
 					rf.mu.Unlock()
-					continue
-				}
-				if i > rf.lastIncludedIndex && i <= rf.commitIndex {
-					logCommited := rf.getLogEntry(i)
-					command := logCommited.Command // panic: runtime error: invalid memory address or nil pointer dereference, occurred in both 3A and 3B.
-					rf.mu.Unlock()
-					index := i
-					rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: index + 1}
+					rf.applyCh <- applyMsg
 				} else {
-					DPrintln("error: index:%d, lastIncludedIndex:%d, commitIndex:%d", i, rf.lastIncludedIndex, rf.commitIndex)
 					rf.mu.Unlock()
 				}
+				rf.mu.Lock()
 			}
-			prevCommitIdx = cIdx
+			rf.lastAppliedIndex = rf.commitIndex
+			rf.mu.Unlock()
+		} else {
+			rf.mu.Unlock()
 		}
-
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(time.Millisecond * 10)
 	}
 }
 
@@ -904,6 +896,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
+	rf.mu.Lock()
 	rf.state = Follower
 	rf.rtCh = make(chan int) // Remember initialization of channel.
 	rf.applyCh = applyCh
@@ -912,7 +905,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 
 	rf.commitIndex = -1
-	rf.lastApplied = 0
+	rf.lastAppliedIndex = -1
 
 	rf.lastIncludedIndex = -1
 	rf.lastIncludedTerm = -1
@@ -927,9 +920,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	for i := range rf.matchIndex {
+	for i := range rf.nextIndex {
 		rf.nextIndex[i] = rf.getLastLogIndex() + 1
 	}
+	rf.mu.Unlock()
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
