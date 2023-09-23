@@ -151,6 +151,11 @@ func (kv *KVServer) applier() {
 				kv.mu.Unlock()
 				continue
 			}
+			if msg.CommandIndex <= kv.lastCmdIndex {
+				Debug(dError, "K%d tries to apply an old cmd, CI:%d LCI:%d", msg.CommandIndex, kv.lastCmdIndex)
+				kv.mu.Unlock()
+				continue
+			}
 			// apply the command to state machine and update cmap
 			kv.applyCmd(cmd)
 			kv.cmap[cmd.ClientId] = cmd.CommandId
@@ -206,7 +211,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
-	kv.applyCh = make(chan raft.ApplyMsg, 10)
+	// kv.applyCh = make(chan raft.ApplyMsg, 10)
+	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.

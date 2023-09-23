@@ -531,6 +531,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnap
 	}
 
 	rf.applyCh <- ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotIndex: args.LastIncludedIndex + 1, SnapshotTerm: args.LastIncludedTerm}
+	Debug(dCommit, "S%d applied SN LII:%d", rf.me, args.LastIncludedIndex)
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotRequest, reply *InstallSnapshotReply) bool {
@@ -885,10 +886,12 @@ func (rf *Raft) applier() {
 				lastIncludedIndex := rf.lastIncludedIndex
 				if i > lastIncludedIndex {
 					logEntry := rf.getLogEntry(i)
+					idx := logEntry.Index
 					applyMsg := ApplyMsg{CommandValid: true, Command: logEntry.Command, CommandIndex: logEntry.Index + 1}
 					Debug(dLog2, "S%d applied at %d", rf.me, i)
 					rf.mu.Unlock()
 					rf.applyCh <- applyMsg
+					Debug(dCommit, "S%d applied cmd at %d, LII:%d", rf.me, idx, lastIncludedIndex)
 				} else {
 					rf.mu.Unlock()
 				}
