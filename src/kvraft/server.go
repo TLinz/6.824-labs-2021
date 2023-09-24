@@ -163,8 +163,21 @@ func (kv *KVServer) applier() {
 			kv.lastCmd = msg.Command.(Op)
 			kv.mu.Unlock()
 		} else if msg.SnapshotValid {
+			// kv.mu.Lock()
+			// kv.readPersist(msg.Snapshot)
+			// kv.mu.Unlock()
 			kv.mu.Lock()
+			if msg.SnapshotIndex < kv.lastCmdIndex {
+				// if kvserver refuse to install snapshot, then raft must refuse too, but under current implementation,
+				// raft will always install it before telling the service, this inconsistency may cause operation loss
+				// when restarting, how to use CondInstallSnapshot to sync them?
+				Debug(dError, "K%d tries to apply an old snapshot, SI:%d LCI:%d", msg.SnapshotIndex, kv.lastCmdIndex)
+				kv.mu.Unlock()
+				continue
+			}
 			kv.readPersist(msg.Snapshot)
+			kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot)
+			kv.lastCmdIndex = msg.SnapshotIndex
 			kv.mu.Unlock()
 		}
 		time.Sleep(time.Millisecond * 10)

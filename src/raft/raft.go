@@ -19,6 +19,7 @@ package raft
 
 import (
 	"bytes"
+	"log"
 	"math/rand"
 	"sort"
 	"sync"
@@ -113,6 +114,9 @@ func (rf *Raft) getLogEntry(index int) *logEntry {
 	}
 	Debug(dError, "S%d tries to get log entry at %d, LII:%d, LLI:%d",
 		rf.me, index, rf.lastIncludedIndex, rf.getLastLogIndex())
+	for i := range rf.log {
+		log.Printf("log index:%d\n", rf.log[i].Index)
+	}
 	return nil
 }
 
@@ -190,6 +194,20 @@ func (rf *Raft) readPersist(data []byte) {
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	lastIncludedIndex = lastIncludedIndex - 1
+	rf.lastIncludedIndex = lastIncludedIndex
+	rf.lastIncludedTerm = lastIncludedTerm
+	Debug(dSnap, "S%d installed SN, LII:%d LIT:%d", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm)
+
+	if lastIncludedIndex >= rf.getLastLogIndex() {
+		rf.log = []logEntry{}
+	} else {
+		rf.log = rf.log[rf.getLogRealIndex(lastIncludedIndex)+1:]
+	}
+	rf.persister.SaveStateAndSnapshot(rf.getPersistState(), snapshot)
+
 	return true
 }
 
@@ -503,6 +521,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnap
 		rf.persister.SaveRaftState(rf.getPersistState())
 	}
 
+	// received outdated snapshot due to retransmission by leader
+	// actrually we can use 'if args.LastIncludedIndex == rf.lastIncludedIndex' as the condition
 	if args.LastIncludedTerm < rf.lastIncludedTerm || args.LastIncludedIndex <= rf.lastIncludedIndex {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -513,16 +533,16 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnap
 	reply.Term = rf.currentTerm
 	reply.Success = true
 
-	rf.lastIncludedIndex = args.LastIncludedIndex
-	rf.lastIncludedTerm = args.LastIncludedTerm
-	Debug(dSnap, "S%d install SN, LII:%d LIT:%d", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm)
+	// rf.lastIncludedIndex = args.LastIncludedIndex
+	// rf.lastIncludedTerm = args.LastIncludedTerm
+	// Debug(dSnap, "S%d install SN, LII:%d LIT:%d", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm)
 
-	if args.LastIncludedIndex >= rf.getLastLogIndex() {
-		rf.log = []logEntry{}
-	} else {
-		rf.log = rf.log[rf.getLogRealIndex(args.LastIncludedIndex)+1:]
-	}
-	rf.persister.SaveStateAndSnapshot(rf.getPersistState(), args.Data)
+	// if args.LastIncludedIndex >= rf.getLastLogIndex() {
+	// 	rf.log = []logEntry{}
+	// } else {
+	// 	rf.log = rf.log[rf.getLogRealIndex(args.LastIncludedIndex)+1:]
+	// }
+	// rf.persister.SaveStateAndSnapshot(rf.getPersistState(), args.Data)
 
 	rf.rtFlag = true
 	rf.mu.Unlock()
@@ -531,7 +551,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnap
 	}
 
 	rf.applyCh <- ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotIndex: args.LastIncludedIndex + 1, SnapshotTerm: args.LastIncludedTerm}
-	Debug(dCommit, "S%d applied SN LII:%d", rf.me, args.LastIncludedIndex)
+	Debug(dCommit, "S%d installing SN LII:%d", rf.me, args.LastIncludedIndex)
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotRequest, reply *InstallSnapshotReply) bool {
@@ -783,9 +803,11 @@ func (rf *Raft) ticker() {
 										return
 									}
 									if snreply.Success {
-										rf.matchIndex[idx] = snargs.LastIncludedIndex
-										rf.nextIndex[idx] = snargs.LastIncludedIndex + 1
-										Debug(dLeader, "S%d <- S%d IS yes reply, set its NI -> %d", rf.me, idx, rf.nextIndex[idx])
+										if snargs.LastIncludedIndex > rf.matchIndex[idx] { // reply has been outdated (Compared with AE)!!!
+											rf.matchIndex[idx] = snargs.LastIncludedIndex
+											rf.nextIndex[idx] = snargs.LastIncludedIndex + 1
+											Debug(dLeader, "S%d <- S%d IS yes reply, set its NI -> %d", rf.me, idx, rf.nextIndex[idx])
+										}
 									}
 								}
 							case <-timeout:
@@ -836,29 +858,31 @@ func (rf *Raft) ticker() {
 										Debug(dTerm, "S%d <- S%d AE no reply, become follower", rf.me, idx)
 										return
 									}
-									if reply.Success {
-										rf.matchIndex[idx] = args.PrevLogIndex + len(args.Entries)
-										rf.nextIndex[idx] = args.PrevLogIndex + len(args.Entries) + 1
-										Debug(dLeader, "S%d <- S%d AE yes reply, set its NI -> %d", rf.me, idx, rf.nextIndex[idx])
+									if args.PrevLogIndex+len(args.Entries) > rf.matchIndex[idx] { // consider the reply has been outdated (Compared with IS)!!!
+										if reply.Success {
+											rf.matchIndex[idx] = args.PrevLogIndex + len(args.Entries)
+											rf.nextIndex[idx] = args.PrevLogIndex + len(args.Entries) + 1
+											Debug(dLeader, "S%d <- S%d AE yes reply, set its NI -> %d", rf.me, idx, rf.nextIndex[idx])
 
-										// If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,
-										// and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
-										cp := make([]int, len(rf.matchIndex))
-										copy(cp, rf.matchIndex)
-										sort.Ints(cp)
-										N := cp[(len(cp)-1)/2]
-										// Leader can only commit log entries of its own term.
-										if N > rf.commitIndex && (rf.getLogEntry(N)).Term == rf.currentTerm {
-											rf.commitIndex = N
-											Debug(dLeader, "S%d CIDX -> %d", rf.me, rf.commitIndex)
-										}
-									} else {
-										if reply.ConflictTerm != -1 && lastLog(originalLogs, reply.ConflictTerm) != -1 {
-											rf.nextIndex[idx] = lastLog(originalLogs, reply.ConflictTerm) + 1
+											// If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,
+											// and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
+											cp := make([]int, len(rf.matchIndex))
+											copy(cp, rf.matchIndex)
+											sort.Ints(cp)
+											N := cp[(len(cp)-1)/2]
+											// Leader can only commit log entries of its own term.
+											if N > rf.commitIndex && (rf.getLogEntry(N)).Term == rf.currentTerm {
+												rf.commitIndex = N
+												Debug(dLeader, "S%d CIDX -> %d", rf.me, rf.commitIndex)
+											}
 										} else {
-											rf.nextIndex[idx] = reply.ConflictIndex
+											if reply.ConflictTerm != -1 && lastLog(originalLogs, reply.ConflictTerm) != -1 {
+												rf.nextIndex[idx] = lastLog(originalLogs, reply.ConflictTerm) + 1
+											} else {
+												rf.nextIndex[idx] = reply.ConflictIndex
+											}
+											Debug(dLeader, "S%d <- S%d AE no reply, set its NI -> %d", rf.me, idx, rf.nextIndex[idx])
 										}
-										Debug(dLeader, "S%d <- S%d AE no reply, set its NI -> %d", rf.me, idx, rf.nextIndex[idx])
 									}
 								}
 							case <-timeout:
