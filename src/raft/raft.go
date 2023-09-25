@@ -19,7 +19,6 @@ package raft
 
 import (
 	"bytes"
-	"log"
 	"math/rand"
 	"sort"
 	"sync"
@@ -114,9 +113,6 @@ func (rf *Raft) getLogEntry(index int) *logEntry {
 	}
 	Debug(dError, "S%d tries to get log entry at %d, LII:%d, LLI:%d",
 		rf.me, index, rf.lastIncludedIndex, rf.getLastLogIndex())
-	for i := range rf.log {
-		log.Printf("log index:%d\n", rf.log[i].Index)
-	}
 	return nil
 }
 
@@ -273,8 +269,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 
 	isUpToDate := true
-	if len(rf.log) != 0 {
-		lastLog := rf.log[len(rf.log)-1]
+	// if len(rf.log) != 0 {
+	// 	lastLog := rf.log[len(rf.log)-1]
+	// 	isUpToDate = args.LastLogTerm > lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex >= lastLog.Index)
+	// }
+	lastLog := rf.getLogEntry(rf.getLastLogIndex())
+	if lastLog != nil {
 		isUpToDate = args.LastLogTerm > lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex >= lastLog.Index)
 	}
 
@@ -804,6 +804,7 @@ func (rf *Raft) ticker() {
 									}
 									if snreply.Success {
 										if snargs.LastIncludedIndex > rf.matchIndex[idx] { // reply has been outdated (Compared with AE)!!!
+											// still some bugs here, I think...
 											rf.matchIndex[idx] = snargs.LastIncludedIndex
 											rf.nextIndex[idx] = snargs.LastIncludedIndex + 1
 											Debug(dLeader, "S%d <- S%d IS yes reply, set its NI -> %d", rf.me, idx, rf.nextIndex[idx])

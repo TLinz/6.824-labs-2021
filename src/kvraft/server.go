@@ -67,11 +67,13 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Unlock()
 
 	timeout := time.After(2000 * time.Millisecond)
+	Debug(dClient, "K%d Get k:%s", kv.me, args.Key)
 
 	for !kv.killed() {
 		select {
 		case <-timeout:
 			reply.Err = ErrWrongLeader
+			Debug(dClient, "K%d Get k:%s timeout idx:%d", kv.me, args.Key, idx)
 			return
 		default:
 			kv.mu.Lock()
@@ -81,16 +83,19 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 					if ok {
 						reply.Err = OK
 						reply.Value = v
+						Debug(dClient, "K%d Get k:%s success v:%s LCI:%d", kv.me, args.Key, reply.Value, kv.lastCmdIndex)
 						kv.mu.Unlock()
 						return
 					} else {
 						reply.Err = ErrNoKey
 						reply.Value = ""
+						Debug(dClient, "K%d Get k:%s success v:nil LCI:%d", kv.me, args.Key, kv.lastCmdIndex)
 						kv.mu.Unlock()
 						return
 					}
 				}
 				reply.Err = ErrWrongLeader
+				Debug(dClient, "K%d Get k:%s wrong LCI:%d", kv.me, args.Key, kv.lastCmdIndex)
 				kv.mu.Unlock()
 				return
 			}
@@ -115,21 +120,25 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Unlock()
 
 	timeout := time.After(2000 * time.Millisecond)
+	Debug(dClient, "K%d %d k:%s v:%s idx:%d", kv.me, args.Op, args.Key, args.Value, idx)
 
 	for !kv.killed() {
 		select {
 		case <-timeout:
 			reply.Err = ErrWrongLeader
+			Debug(dClient, "K%d %d k:%s v:%s timeout", kv.me, args.Op, args.Key, args.Value)
 			return
 		default:
 			kv.mu.Lock()
 			if idx == kv.lastCmdIndex {
 				if command == kv.lastCmd {
 					reply.Err = OK
+					Debug(dClient, "K%d %d k:%s v:%s success, LCI:%d", kv.me, args.Op, args.Key, args.Value, kv.lastCmdIndex)
 					kv.mu.Unlock()
 					return
 				}
 				reply.Err = ErrWrongLeader
+				Debug(dClient, "K%d %d k:%s v:%s wrong, LCI:%d", kv.me, args.Op, args.Key, args.Value, kv.lastCmdIndex)
 				kv.mu.Unlock()
 				return
 			}
@@ -145,14 +154,14 @@ func (kv *KVServer) applier() {
 		if msg.CommandValid {
 			cmd := msg.Command.(Op)
 			kv.mu.Lock()
-			if cmd.CommandId <= kv.cmap[cmd.ClientId] {
-				kv.lastCmdIndex = msg.CommandIndex
-				kv.lastCmd = msg.Command.(Op)
+			if msg.CommandIndex <= kv.lastCmdIndex {
+				Debug(dError, "K%d tries to apply an old cmd, CI:%d LCI:%d", kv.me, msg.CommandIndex, kv.lastCmdIndex)
 				kv.mu.Unlock()
 				continue
 			}
-			if msg.CommandIndex <= kv.lastCmdIndex {
-				Debug(dError, "K%d tries to apply an old cmd, CI:%d LCI:%d", msg.CommandIndex, kv.lastCmdIndex)
+			if cmd.CommandId <= kv.cmap[cmd.ClientId] {
+				kv.lastCmdIndex = msg.CommandIndex
+				kv.lastCmd = msg.Command.(Op)
 				kv.mu.Unlock()
 				continue
 			}
@@ -161,23 +170,28 @@ func (kv *KVServer) applier() {
 			kv.cmap[cmd.ClientId] = cmd.CommandId
 			kv.lastCmdIndex = msg.CommandIndex
 			kv.lastCmd = msg.Command.(Op)
+			Debug(dClient, "K%d %s k:%d v:%d applied LCI:%d", kv.me, cmd.Type, cmd.Key, cmd.Value, kv.lastCmdIndex)
 			kv.mu.Unlock()
 		} else if msg.SnapshotValid {
 			// kv.mu.Lock()
 			// kv.readPersist(msg.Snapshot)
 			// kv.mu.Unlock()
 			kv.mu.Lock()
-			if msg.SnapshotIndex < kv.lastCmdIndex {
+			if msg.SnapshotIndex <= kv.lastCmdIndex {
 				// if kvserver refuse to install snapshot, then raft must refuse too, but under current implementation,
 				// raft will always install it before telling the service, this inconsistency may cause operation loss
 				// when restarting, how to use CondInstallSnapshot to sync them?
-				Debug(dError, "K%d tries to apply an old snapshot, SI:%d LCI:%d", msg.SnapshotIndex, kv.lastCmdIndex)
+				Debug(dError, "K%d tries to apply an old snapshot, SI:%d LCI:%d", kv.me, msg.SnapshotIndex, kv.lastCmdIndex)
 				kv.mu.Unlock()
 				continue
 			}
-			kv.readPersist(msg.Snapshot)
-			kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot)
-			kv.lastCmdIndex = msg.SnapshotIndex
+			if kv.readPersist(msg.Snapshot) {
+				kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot)
+				kv.lastCmdIndex = msg.SnapshotIndex
+				Debug(dClient, "K%d LCI:%d after cond install snapshot", kv.me, kv.lastCmdIndex)
+			} else {
+				Debug(dError, "K%d snapshot inconsistent...", kv.me)
+			}
 			kv.mu.Unlock()
 		}
 		time.Sleep(time.Millisecond * 10)
@@ -241,6 +255,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 		kv.readPersist(persister.ReadSnapshot())
 		kv.mu.Unlock()
 
+		Debug(dInfo, "K%d start... LCI:%d", kv.me, kv.lastCmdIndex)
+
 		go func() {
 			for !kv.killed() {
 				kv.mu.Lock()
@@ -268,9 +284,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 }
 
 // restore previously persisted state.
-func (kv *KVServer) readPersist(data []byte) {
+func (kv *KVServer) readPersist(data []byte) bool {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
+		return false
 	}
 
 	r := bytes.NewBuffer(data)
@@ -285,11 +301,17 @@ func (kv *KVServer) readPersist(data []byte) {
 		d.Decode(&kvmap) != nil ||
 		d.Decode(&lastCmdIndex) != nil ||
 		d.Decode(&lastCmd) != nil {
+		return false
 	} else {
+		if lastCmdIndex <= kv.lastCmdIndex {
+			Debug(dError, "K%d persist error SLCI:%d KLCI:%d", kv.me, lastCmdIndex, kv.lastCmdIndex)
+			return false
+		}
 		kv.maxraftstate = maxraftstate
 		kv.cmap = cmap
 		kv.kv = kvmap
 		kv.lastCmdIndex = lastCmdIndex
 		kv.lastCmd = lastCmd
+		return true
 	}
 }
