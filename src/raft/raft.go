@@ -269,10 +269,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 
 	isUpToDate := true
-	// if len(rf.log) != 0 {
-	// 	lastLog := rf.log[len(rf.log)-1]
-	// 	isUpToDate = args.LastLogTerm > lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex >= lastLog.Index)
-	// }
 	lastLog := rf.getLogEntry(rf.getLastLogIndex())
 	if lastLog != nil {
 		isUpToDate = args.LastLogTerm > lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex >= lastLog.Index)
@@ -532,17 +528,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnap
 
 	reply.Term = rf.currentTerm
 	reply.Success = true
-
-	// rf.lastIncludedIndex = args.LastIncludedIndex
-	// rf.lastIncludedTerm = args.LastIncludedTerm
-	// Debug(dSnap, "S%d install SN, LII:%d LIT:%d", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm)
-
-	// if args.LastIncludedIndex >= rf.getLastLogIndex() {
-	// 	rf.log = []logEntry{}
-	// } else {
-	// 	rf.log = rf.log[rf.getLogRealIndex(args.LastIncludedIndex)+1:]
-	// }
-	// rf.persister.SaveStateAndSnapshot(rf.getPersistState(), args.Data)
 
 	rf.rtFlag = true
 	rf.mu.Unlock()
@@ -826,8 +811,6 @@ func (rf *Raft) ticker() {
 							args.PrevLogTerm = -1
 						} else {
 							args.PrevLogTerm = rf.getLogEntry(args.PrevLogIndex).Term
-							// ❌ 2023/09/22 10:22:56 error: index:124, lastIncludedIndex:123, lastLogIndex:123
-							// ❌ panic: runtime error: invalid memory address or nil pointer dereference
 						}
 						args.LeaderCommit = rf.commitIndex
 
@@ -842,7 +825,6 @@ func (rf *Raft) ticker() {
 						go func(int) {
 							timeout := time.After(2000 * time.Millisecond)
 							okCh := make(chan bool, 1)
-							// Debug(dTimer, "S%d Leader, checking heartbeats", rf.me)
 							select {
 							case okCh <- rf.sendAppendEntries(idx, args, reply):
 								rf.mu.Lock()

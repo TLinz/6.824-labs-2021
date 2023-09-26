@@ -173,25 +173,17 @@ func (kv *KVServer) applier() {
 			Debug(dClient, "K%d %s k:%d v:%d applied LCI:%d", kv.me, cmd.Type, cmd.Key, cmd.Value, kv.lastCmdIndex)
 			kv.mu.Unlock()
 		} else if msg.SnapshotValid {
-			// kv.mu.Lock()
-			// kv.readPersist(msg.Snapshot)
-			// kv.mu.Unlock()
 			kv.mu.Lock()
 			if msg.SnapshotIndex <= kv.lastCmdIndex {
-				// if kvserver refuse to install snapshot, then raft must refuse too, but under current implementation,
-				// raft will always install it before telling the service, this inconsistency may cause operation loss
-				// when restarting, how to use CondInstallSnapshot to sync them?
 				Debug(dError, "K%d tries to apply an old snapshot, SI:%d LCI:%d", kv.me, msg.SnapshotIndex, kv.lastCmdIndex)
 				kv.mu.Unlock()
 				continue
 			}
-			if kv.readPersist(msg.Snapshot) {
-				kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot)
-				kv.lastCmdIndex = msg.SnapshotIndex
-				Debug(dClient, "K%d LCI:%d after cond install snapshot", kv.me, kv.lastCmdIndex)
-			} else {
-				Debug(dError, "K%d snapshot inconsistent...", kv.me)
-			}
+			kv.readPersist(msg.Snapshot)
+			kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot)
+			kv.lastCmdIndex = msg.SnapshotIndex
+			Debug(dClient, "K%d LCI:%d after cond install snapshot", kv.me, kv.lastCmdIndex)
+
 			kv.mu.Unlock()
 		}
 		time.Sleep(time.Millisecond * 10)
@@ -284,9 +276,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 }
 
 // restore previously persisted state.
-func (kv *KVServer) readPersist(data []byte) bool {
+func (kv *KVServer) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return false
 	}
 
 	r := bytes.NewBuffer(data)
@@ -301,17 +292,11 @@ func (kv *KVServer) readPersist(data []byte) bool {
 		d.Decode(&kvmap) != nil ||
 		d.Decode(&lastCmdIndex) != nil ||
 		d.Decode(&lastCmd) != nil {
-		return false
 	} else {
-		if lastCmdIndex <= kv.lastCmdIndex {
-			Debug(dError, "K%d persist error SLCI:%d KLCI:%d", kv.me, lastCmdIndex, kv.lastCmdIndex)
-			return false
-		}
 		kv.maxraftstate = maxraftstate
 		kv.cmap = cmap
 		kv.kv = kvmap
 		kv.lastCmdIndex = lastCmdIndex
 		kv.lastCmd = lastCmd
-		return true
 	}
 }
