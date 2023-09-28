@@ -11,5 +11,5 @@
 Passed TestSnapshotUnreliableRecoverConcurrentPartitionLinearizable3B 16000 times, which shows that the system should be reliable, because linear consistency testing can theoretically detect all bugs.
 
 ```
-![Alt text](https://github.com/TLinz/6.824-labs-2021/img/3b.png)
+![Alt text](https://github.com/TLinz/6.824-labs-2021/blob/master/img/3b.png)
 ```
