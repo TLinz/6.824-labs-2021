@@ -4,14 +4,24 @@ package shardctrler
 // Shardctrler clerk.
 //
 
-import "6.824/labrpc"
-import "time"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
+	"sync"
+	"time"
+
+	"6.824/labrpc"
+)
+
+var cmu sync.Mutex
+var counter int
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	mu        sync.Mutex
+	clerkId   int // unique identifier
+	commandId int // monotonically increasing command counteras
 }
 
 func nrand() int64 {
@@ -25,13 +35,26 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.commandId = 0
+
+	cmu.Lock()
+	ck.clerkId = counter
+	counter += 1
+	cmu.Unlock()
 	return ck
 }
 
 func (ck *Clerk) Query(num int) Config {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	ck.commandId += 1
 	args := &QueryArgs{}
 	// Your code here.
 	args.Num = num
+	args.ClientId = ck.clerkId
+	args.CommandId = ck.commandId
+
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -46,9 +69,15 @@ func (ck *Clerk) Query(num int) Config {
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	ck.commandId += 1
 	args := &JoinArgs{}
 	// Your code here.
 	args.Servers = servers
+	args.ClientId = ck.clerkId
+	args.CommandId = ck.commandId
 
 	for {
 		// try each known server.
@@ -64,9 +93,15 @@ func (ck *Clerk) Join(servers map[int][]string) {
 }
 
 func (ck *Clerk) Leave(gids []int) {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	ck.commandId += 1
 	args := &LeaveArgs{}
 	// Your code here.
 	args.GIDs = gids
+	args.ClientId = ck.clerkId
+	args.CommandId = ck.commandId
 
 	for {
 		// try each known server.
@@ -82,10 +117,16 @@ func (ck *Clerk) Leave(gids []int) {
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	ck.commandId += 1
 	args := &MoveArgs{}
 	// Your code here.
 	args.Shard = shard
 	args.GID = gid
+	args.ClientId = ck.clerkId
+	args.CommandId = ck.commandId
 
 	for {
 		// try each known server.
