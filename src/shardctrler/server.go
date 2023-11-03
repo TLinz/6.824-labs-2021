@@ -3,6 +3,7 @@ package shardctrler
 import (
 	"math"
 	"reflect"
+	"sort"
 	"sync"
 	"time"
 
@@ -18,7 +19,6 @@ type ShardCtrler struct {
 	applyCh chan raft.ApplyMsg
 
 	// Your data here.
-	killed       bool
 	lastCmdIndex int
 	lastCmd      Op
 	cmap         map[int]int // client id to max applied command id
@@ -347,13 +347,22 @@ func (sc *ShardCtrler) doQuery(num int) Config {
 	return newConfig
 }
 
-func firstNonZeroKey(inputMap map[int][]int) int {
+func minNonZeroKey(inputMap map[int][]int) int {
+	// // ❌ Cannot use range to iterate map, because it is not ordered
+	// for key := range inputMap {
+	// 	if key != 0 {
+	// 		return key
+	// 	}
+	// }
+
+	minKey := math.MaxInt
 	for key := range inputMap {
-		if key != 0 {
-			return key
+		if key != 0 && key < minKey {
+			minKey = key
 		}
 	}
-	return -1
+
+	return minKey
 }
 
 func (sc *ShardCtrler) doJoin(gsmap map[int][]string) {
@@ -382,7 +391,7 @@ func (sc *ShardCtrler) doJoin(gsmap map[int][]string) {
 	for shard, gid := range newConfig.Shards {
 		finalGid := gid
 		if gid == 0 {
-			finalGid = firstNonZeroKey(group2Shards)
+			finalGid = minNonZeroKey(group2Shards)
 			if finalGid == -1 {
 				panic("No gid available")
 			}
@@ -430,7 +439,7 @@ func (sc *ShardCtrler) doLeave(GIDs []int) {
 	for shard, gid := range newConfig.Shards {
 		finalGid := gid
 		if gid == 0 {
-			finalGid = firstNonZeroKey(group2Shards)
+			finalGid = minNonZeroKey(group2Shards)
 			if finalGid == -1 {
 				panic("No gid available")
 			}
@@ -478,32 +487,52 @@ func (sc *ShardCtrler) doMove(Shard, GID int) {
 	sc.configs = append(sc.configs, newConfig)
 }
 
+// Return gid should be deterministic
 func getGIDMaxShards(group2Shards map[int][]int) int {
-	maxGID := 0
+	// maxGID := 0
 	maxShards := -1
 	for gid, shards := range group2Shards {
 		if gid == 0 {
 			continue
 		}
 		if len(shards) > maxShards {
-			maxGID = gid
+			// maxGID = gid
 			maxShards = len(shards)
 		}
 	}
-	return maxGID
+
+	maxGIDs := make([]int, 0)
+	for gid, shards := range group2Shards {
+		if len(shards) == maxShards {
+			maxGIDs = append(maxGIDs, gid)
+		}
+	}
+
+	sort.Ints(maxGIDs)
+	return maxGIDs[0]
 }
 
+// Return gid should be deterministic
 func getGIDMinShards(group2Shards map[int][]int) int {
-	minGID := 0
+	// minGID := 0
 	minShards := math.MaxInt
 	for gid, shards := range group2Shards {
 		if gid == 0 {
 			continue
 		}
 		if len(shards) < minShards {
-			minGID = gid
+			// minGID = gid
 			minShards = len(shards)
 		}
 	}
-	return minGID
+
+	minGIDs := make([]int, 0)
+	for gid, shards := range group2Shards {
+		if len(shards) == minShards {
+			minGIDs = append(minGIDs, gid)
+		}
+	}
+
+	sort.Ints(minGIDs)
+	return minGIDs[0]
 }
