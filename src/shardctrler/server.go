@@ -489,14 +489,12 @@ func (sc *ShardCtrler) doMove(Shard, GID int) {
 
 // Return gid should be deterministic
 func getGIDMaxShards(group2Shards map[int][]int) int {
-	// maxGID := 0
 	maxShards := -1
 	for gid, shards := range group2Shards {
 		if gid == 0 {
 			continue
 		}
 		if len(shards) > maxShards {
-			// maxGID = gid
 			maxShards = len(shards)
 		}
 	}
@@ -514,14 +512,12 @@ func getGIDMaxShards(group2Shards map[int][]int) int {
 
 // Return gid should be deterministic
 func getGIDMinShards(group2Shards map[int][]int) int {
-	// minGID := 0
 	minShards := math.MaxInt
 	for gid, shards := range group2Shards {
 		if gid == 0 {
 			continue
 		}
 		if len(shards) < minShards {
-			// minGID = gid
 			minShards = len(shards)
 		}
 	}

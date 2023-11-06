@@ -20,6 +20,7 @@ package raft
 import (
 	"bytes"
 	"math/rand"
+	"reflect"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -435,7 +436,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					break
 				}
 
-				if args.Entries[i] == *rf.getLogEntry(idx) {
+				// if args.Entries[i] == *rf.getLogEntry(idx) {
+				if reflect.DeepEqual(args.Entries[i], *rf.getLogEntry(idx)) {
 					idx++
 				} else {
 					isConflict = true
