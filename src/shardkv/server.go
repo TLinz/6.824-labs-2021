@@ -13,15 +13,48 @@ import (
 	"6.824/shardctrler"
 )
 
-type Op struct {
+type CommandType uint8
+
+const (
+	Operation CommandType = iota
+	Configuration
+	Migration
+)
+
+type Command struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	ClientId  int
-	CommandId int
-	Type      string // "Put" or "Append" or "Get"
-	Key       string
-	Value     string
+	ClientId    int
+	CommandId   int
+	CommandType CommandType // Operation, Configuration, Migration
+
+	// Operation
+	OpType string // "Put" or "Append" or "Get"
+	Key    string
+	Value  string
+
+	// Configuration
+	Config shardctrler.Config
+
+	// Migration(Push model)
+	ConfigNum int // only push when the config number is the same
+	Shards    []Shard
+}
+
+type ShardState uint8
+
+const (
+	Serving ShardState = iota
+	Pushing
+	Pulling
+)
+
+type Shard struct {
+	ShardId int
+	State   ShardState
+	Kv      map[string]string
+	Cmap    map[int]int
 }
 
 type ShardKV struct {
@@ -33,41 +66,111 @@ type ShardKV struct {
 	gid          int
 	ctrlers      []*labrpc.ClientEnd
 	maxraftstate int // snapshot if log grows this big
+	persister    *raft.Persister
 
 	// Your definitions here.
-	dead   int32 // set by Kill()
-	scck   *shardctrler.Clerk
-	config shardctrler.Config
+	dead       int32 // set by Kill()
+	scck       *shardctrler.Clerk
+	prevConfig shardctrler.Config
+	curConfig  shardctrler.Config
 
-	cmap         map[int]int       // client id to max applied command id
-	kv           map[string]string // database
+	shards map[int]Shard // shardId -> Shard
+
 	lastCmdIndex int
-	lastCmd      Op
+	lastCmd      Command
 
-	bmu       sync.Mutex
-	persister *raft.Persister
+	bmu sync.Mutex
 }
 
-func (kv *ShardKV) applyCmd(cmd Op) {
-	switch cmd.Type {
-	case "Get":
-	case "Put":
-		kv.kv[cmd.Key] = cmd.Value
-	case "Append":
-		kv.kv[cmd.Key] = kv.kv[cmd.Key] + cmd.Value
+func (kv *ShardKV) updateShardsConfig(config shardctrler.Config) {
+	// Get shards corresponding to kv.gid in config
+	var shards []Shard
+	for shardId, gid := range config.Shards {
+		if gid == kv.gid {
+			shards = append(shards, kv.shards[shardId])
+		}
+	}
+
+	// Update shard state to pushing
+	for shardId, shard := range kv.shards {
+		// Check if the shard is in the shards slice
+		found := false
+		for _, shard := range shards {
+			if shard.ShardId == shardId {
+				found = true
+				break
+			}
+		}
+
+		// If the shard is not found in shards, update its state to Pushing
+		if !found {
+			shard.State = Pushing
+		}
+	}
+
+	// Update shard state to pulling
+	for shardId := range shards {
+		// Check if the shard is in the shards slice
+		found := false
+		for _, shard := range kv.shards {
+			if shard.ShardId == shardId {
+				found = true
+				break
+			}
+		}
+
+		// make empty shard
+		if !found {
+			shard := Shard{}
+			shard.ShardId = shardId
+			shard.State = Pulling
+			shard.Kv = make(map[string]string)
+			shard.Cmap = make(map[int]int)
+			kv.shards[shardId] = shard
+		}
+	}
+}
+
+func (kv *ShardKV) applyCmd(cmd Command) {
+	switch cmd.CommandType {
+	case Operation:
+		switch cmd.OpType {
+		case "Get":
+		case "Put":
+			shard := kv.shards[key2shard(cmd.Key)]
+			shard.Kv[cmd.Key] = cmd.Value
+		case "Append":
+			shard := kv.shards[key2shard(cmd.Key)]
+			shard.Kv[cmd.Key] += cmd.Value
+		}
+	case Configuration:
+		if cmd.Config.Num != kv.curConfig.Num+1 {
+			Debug(dClient, "K%d applyCmd wrong config num:%d", kv.me, cmd.Config.Num)
+			return
+		}
+		kv.updateShardsConfig(cmd.Config)
+		kv.prevConfig = kv.curConfig
+		kv.curConfig = cmd.Config
+	case Migration:
+		// TODO: ...
 	}
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
 	kv.bmu.Lock()
 	defer kv.bmu.Unlock()
 
 	kv.mu.Lock()
-	command := Op{args.ClientId, args.CommandId, "Get", args.Key, ""}
+	// command := Op{args.ClientId, args.CommandId, "Get", args.Key, ""}
+	command := Command{}
+	command.ClientId = args.ClientId
+	command.CommandId = args.CommandId
+	command.CommandType = Operation
+	command.OpType = "Get"
+	command.Key = args.Key
 
 	// check if the shard is in the current config
-	if kv.config.Shards[key2shard(args.Key)] != kv.gid {
+	if kv.curConfig.Shards[key2shard(args.Key)] != kv.gid {
 		reply.Err = ErrWrongGroup
 		kv.mu.Unlock()
 		return
@@ -93,8 +196,9 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		default:
 			kv.mu.Lock()
 			if idx == kv.lastCmdIndex {
-				if command == kv.lastCmd {
-					v, ok := kv.kv[command.Key]
+				if reflect.DeepEqual(command, kv.lastCmd) {
+					shard := kv.shards[key2shard(command.Key)]
+					v, ok := shard.Kv[command.Key]
 					if ok {
 						reply.Err = OK
 						reply.Value = v
@@ -126,10 +230,17 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	defer kv.bmu.Unlock()
 
 	kv.mu.Lock()
-	command := Op{args.ClientId, args.CommandId, args.Op, args.Key, args.Value}
+	// command := Op{args.ClientId, args.CommandId, args.OpType, args.Key, args.Value}
+	command := Command{}
+	command.ClientId = args.ClientId
+	command.CommandId = args.CommandId
+	command.CommandType = Operation
+	command.OpType = args.OpType
+	command.Key = args.Key
+	command.Value = args.Value
 
 	// check if the shard is in the current config
-	if kv.config.Shards[key2shard(args.Key)] != kv.gid {
+	if kv.curConfig.Shards[key2shard(args.Key)] != kv.gid {
 		reply.Err = ErrWrongGroup
 		kv.mu.Unlock()
 		return
@@ -144,25 +255,63 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Unlock()
 
 	timeout := time.After(2000 * time.Millisecond)
-	Debug(dClient, "K%d %d k:%s v:%s idx:%d", kv.me, args.Op, args.Key, args.Value, idx)
+	Debug(dClient, "K%d %d k:%s v:%s idx:%d", kv.me, args.OpType, args.Key, args.Value, idx)
 
 	for !kv.killed() {
 		select {
 		case <-timeout:
 			reply.Err = ErrWrongLeader
-			Debug(dClient, "K%d %d k:%s v:%s timeout", kv.me, args.Op, args.Key, args.Value)
+			Debug(dClient, "K%d %d k:%s v:%s timeout", kv.me, args.OpType, args.Key, args.Value)
 			return
 		default:
 			kv.mu.Lock()
 			if idx == kv.lastCmdIndex {
-				if command == kv.lastCmd {
+				if reflect.DeepEqual(command, kv.lastCmd) {
 					reply.Err = OK
-					Debug(dClient, "K%d %d k:%s v:%s success, LCI:%d", kv.me, args.Op, args.Key, args.Value, kv.lastCmdIndex)
+					Debug(dClient, "K%d %d k:%s v:%s success, LCI:%d", kv.me, args.OpType, args.Key, args.Value, kv.lastCmdIndex)
 					kv.mu.Unlock()
 					return
 				}
 				reply.Err = ErrWrongLeader
-				Debug(dClient, "K%d %d k:%s v:%s wrong, LCI:%d", kv.me, args.Op, args.Key, args.Value, kv.lastCmdIndex)
+				Debug(dClient, "K%d %d k:%s v:%s wrong, LCI:%d", kv.me, args.OpType, args.Key, args.Value, kv.lastCmdIndex)
+				kv.mu.Unlock()
+				return
+			}
+			kv.mu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
+func (kv *ShardKV) executeConfig(command Command) {
+	kv.bmu.Lock()
+	defer kv.bmu.Unlock()
+
+	kv.mu.Lock()
+	idx, _, isLeader := kv.rf.Start(command)
+	if !isLeader {
+		kv.mu.Unlock()
+		return
+	}
+	kv.mu.Unlock()
+
+	timeout := time.After(2000 * time.Millisecond)
+	Debug(dClient, "K%d executeConfig idx:%d", kv.me, idx)
+
+	for !kv.killed() {
+		select {
+		case <-timeout:
+			Debug(dClient, "K%d executeConfig timeout", kv.me)
+			return
+		default:
+			kv.mu.Lock()
+			if idx == kv.lastCmdIndex {
+				if reflect.DeepEqual(command, kv.lastCmd) {
+					Debug(dClient, "K%d executeConfig success, LCI:%d", kv.me, kv.lastCmdIndex)
+					kv.mu.Unlock()
+					return
+				}
+				Debug(dClient, "K%d executeConfig wrong, LCI:%d", kv.me, kv.lastCmdIndex)
 				kv.mu.Unlock()
 				return
 			}
@@ -216,7 +365,7 @@ func (kv *ShardKV) killed() bool {
 func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int, gid int, ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.ClientEnd) *ShardKV {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
-	labgob.Register(Op{})
+	labgob.Register(Command{})
 
 	kv := new(ShardKV)
 	kv.me = me
@@ -227,8 +376,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	// Your initialization code here.
 	kv.persister = persister
-	kv.cmap = make(map[int]int)
-	kv.kv = make(map[string]string)
+	kv.shards = make(map[int]Shard)
 
 	// Use something like this to talk to the shardctrler:
 	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
@@ -246,8 +394,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		kv.readPersist(persister.ReadSnapshot())
 		kv.mu.Unlock()
 
-		Debug(dInfo, "K%d start... LCI:%d", kv.me, kv.lastCmdIndex)
-
 		go func() {
 			for !kv.killed() {
 				kv.mu.Lock()
@@ -256,11 +402,11 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 					w := new(bytes.Buffer)
 					e := labgob.NewEncoder(w)
 					e.Encode(kv.maxraftstate)
-					e.Encode(kv.cmap)
-					e.Encode(kv.kv)
+					e.Encode(kv.shards)
 					e.Encode(kv.lastCmdIndex)
 					e.Encode(kv.lastCmd)
-					e.Encode(kv.config)
+					e.Encode(kv.prevConfig)
+					e.Encode(kv.curConfig)
 					snapshot := w.Bytes()
 
 					kv.rf.Snapshot(kv.lastCmdIndex, snapshot)
@@ -276,53 +422,101 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	return kv
 }
 
+func (kv *ShardKV) checkAllServing() bool {
+	for _, shard := range kv.shards {
+		if shard.State != Serving {
+			return false
+		}
+	}
+	return true
+}
+
+// TODO: add locks...
 func (kv *ShardKV) pollShardCtrler() {
 	for !kv.killed() {
-		config := kv.scck.Query(-1)
+		// If all shards are in 'Serving' state, then pull the next config from shardctrler
+		_, isLeader := kv.rf.GetState()
 		kv.mu.Lock()
-		if !reflect.DeepEqual(config, kv.config) {
-			kv.config = config
+		if kv.checkAllServing() && isLeader {
+			kv.mu.Unlock()
+			nextConfig := kv.scck.Query(kv.curConfig.Num + 1)
+			kv.mu.Lock()
+			if nextConfig.Num != kv.curConfig.Num+1 {
+				time.Sleep(100 * time.Millisecond)
+				kv.mu.Unlock()
+				continue
+			}
+			kv.mu.Unlock()
+
+			command := Command{}
+			command.CommandType = Configuration
+			command.Config = nextConfig
+
+			kv.executeConfig(command)
+		} else {
+			kv.mu.Unlock()
 		}
-		kv.mu.Unlock()
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+func (kv *ShardKV) migrateShard(shardId int) {
+	// for !kv.killed() {
+	// }
 }
 
 func (kv *ShardKV) applier() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
 		if msg.CommandValid {
-			cmd := msg.Command.(Op)
-			kv.mu.Lock()
-			if msg.CommandIndex <= kv.lastCmdIndex {
-				Debug(dError, "K%d tries to apply an old cmd, CI:%d LCI:%d", kv.me, msg.CommandIndex, kv.lastCmdIndex)
-				kv.mu.Unlock()
-				continue
-			}
-			if cmd.CommandId <= kv.cmap[cmd.ClientId] {
+			cmd := msg.Command.(Command)
+			switch cmd.CommandType {
+			case Operation:
+				kv.mu.Lock()
+				if msg.CommandIndex <= kv.lastCmdIndex {
+					kv.mu.Unlock()
+					continue
+				}
+				shard := kv.shards[key2shard(cmd.Key)]
+				if cmd.CommandId <= shard.Cmap[cmd.ClientId] {
+					kv.lastCmdIndex = msg.CommandIndex
+					kv.lastCmd = msg.Command.(Command)
+					kv.mu.Unlock()
+					continue
+				}
+				// apply the command to state machine and update cmap
+				kv.applyCmd(cmd)
+				shard.Cmap[cmd.ClientId] = cmd.CommandId
 				kv.lastCmdIndex = msg.CommandIndex
-				kv.lastCmd = msg.Command.(Op)
+				kv.lastCmd = msg.Command.(Command)
 				kv.mu.Unlock()
-				continue
+
+			case Configuration:
+				kv.mu.Lock()
+				if msg.CommandIndex <= kv.lastCmdIndex {
+					kv.mu.Unlock()
+					continue
+				}
+				if cmd.Config.Num != kv.curConfig.Num+1 {
+					kv.mu.Unlock()
+					continue
+				}
+				kv.applyCmd(cmd)
+				kv.lastCmdIndex = msg.CommandIndex
+				kv.lastCmd = msg.Command.(Command)
+				kv.mu.Unlock()
+
+			case Migration:
 			}
-			// apply the command to state machine and update cmap
-			kv.applyCmd(cmd)
-			kv.cmap[cmd.ClientId] = cmd.CommandId
-			kv.lastCmdIndex = msg.CommandIndex
-			kv.lastCmd = msg.Command.(Op)
-			Debug(dClient, "K%d %s k:%d v:%d applied LCI:%d", kv.me, cmd.Type, cmd.Key, cmd.Value, kv.lastCmdIndex)
-			kv.mu.Unlock()
 		} else if msg.SnapshotValid {
 			kv.mu.Lock()
 			if msg.SnapshotIndex <= kv.lastCmdIndex {
-				Debug(dError, "K%d tries to apply an old snapshot, SI:%d LCI:%d", kv.me, msg.SnapshotIndex, kv.lastCmdIndex)
 				kv.mu.Unlock()
 				continue
 			}
 			kv.readPersist(msg.Snapshot)
 			kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot)
 			kv.lastCmdIndex = msg.SnapshotIndex
-			Debug(dClient, "K%d LCI:%d after cond install snapshot", kv.me, kv.lastCmdIndex)
 
 			kv.mu.Unlock()
 		}
@@ -333,28 +527,29 @@ func (kv *ShardKV) applier() {
 // restore previously persisted state.
 func (kv *ShardKV) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
 	}
 
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var maxraftstate int
-	var cmap map[int]int
-	var kvmap map[string]string
+	var shards map[int]Shard
 	var lastCmdIndex int
-	var lastCmd Op
-	var config shardctrler.Config
+	var lastCmd Command
+	var prevConfig shardctrler.Config
+	var curConfig shardctrler.Config
 	if d.Decode(&maxraftstate) != nil ||
-		d.Decode(&cmap) != nil ||
-		d.Decode(&kvmap) != nil ||
+		d.Decode(&shards) != nil ||
 		d.Decode(&lastCmdIndex) != nil ||
 		d.Decode(&lastCmd) != nil ||
-		d.Decode(&config) != nil {
+		d.Decode(&prevConfig) != nil ||
+		d.Decode(&curConfig) != nil {
 	} else {
 		kv.maxraftstate = maxraftstate
-		kv.cmap = cmap
-		kv.kv = kvmap
+		kv.shards = shards
 		kv.lastCmdIndex = lastCmdIndex
 		kv.lastCmd = lastCmd
-		kv.config = config
+		kv.prevConfig = prevConfig
+		kv.curConfig = curConfig
 	}
 }

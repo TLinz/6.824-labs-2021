@@ -117,7 +117,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args := PutAppendArgs{}
 	args.Key = key
 	args.Value = value
-	args.Op = op
+	args.OpType = op
 	args.ClientId = ck.clerkId
 	args.CommandId = ck.commandId
 
